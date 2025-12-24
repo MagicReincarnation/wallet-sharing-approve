@@ -153,34 +153,41 @@ async function finalizeProposal(proposalId) {
   const allApproved = Object.values(votes).every(v => v === 'approve');
   
   if (!allApproved) {
-    await pool.query(`
-      UPDATE proposals SET status = 'rejected', executed_at = NOW() WHERE proposal_id = $1
-    `, [proposalId]);
-    
-    io.emit('proposal-finalized', { proposalId, status: 'rejected', reason: 'Not all devs approved' });
+    await pool.query(`UPDATE proposals SET status = 'rejected', executed_at = NOW() WHERE proposal_id = $1`, [proposalId]);
+    io.emit('proposal-finalized', { proposalId, status: 'rejected' });
     return;
   }
   
-  // All approved, execute action
   try {
+    // Eksekusi ke Blockchain
     const executionResult = await executeProposal(proposal);
     
+    // SIMPAN RESULT LENGKAP KE DATABASE
     await pool.query(`
       UPDATE proposals 
-      SET status = 'executed', execution_result = $1, executed_at = NOW()
+      SET status = 'executed', 
+          execution_result = $1, 
+          executed_at = NOW()
       WHERE proposal_id = $2
     `, [JSON.stringify(executionResult), proposalId]);
     
-    io.emit('proposal-finalized', { proposalId, status: 'executed', result: executionResult });
+    // Kirim notifikasi ke semua dev dengan data TX
+    io.emit('proposal-finalized', {
+      proposalId,
+      status: 'executed',
+      txHash: executionResult.txHash,
+      fullResult: executionResult
+    });
   } catch (e) {
+    console.error("Execution Error:", e);
     await pool.query(`
-      UPDATE proposals SET status = 'failed', execution_result = $1, executed_at = NOW()
-      WHERE proposal_id = $2
-    `, [JSON.stringify({ error: e.message }), proposalId]);
+      UPDATE proposals SET status = 'failed', execution_result = $1, executed_at = NOW() WHERE proposal_id = $2
+    `, [JSON.stringify({ error: e.message, stack: e.stack }), proposalId]);
     
     io.emit('proposal-finalized', { proposalId, status: 'failed', error: e.message });
   }
 }
+
 
 async function executeProposal(proposal) {
   // Reconstruct mnemonic from shares
@@ -383,37 +390,47 @@ app.post('/api/wallet-info', async (req, res) => {
   if (!session) return res.json({ success: false, error: 'Invalid session' });
   
   const state = await getState();
-  if (!state.wallet_generated || !state.wallet_paxi_address) {
+  
+  // LOGIKA DIPERKETAT: Jika paxi_address ada, berarti wallet sudah aktif
+  if (!state.wallet_paxi_address) {
     return res.json({ success: false, error: 'Wallet not generated yet' });
   }
   
   const walletAddress = state.wallet_paxi_address;
   
   try {
-    const balanceRes = await fetch(`${LCD}/cosmos/bank/v1beta1/balances/${walletAddress}`);
+    // Memastikan fetch menggunakan timeout agar tidak gantung
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    
+    const balanceRes = await fetch(`${LCD}/cosmos/bank/v1beta1/balances/${walletAddress}`, { signal: controller.signal });
     const balanceData = await balanceRes.json();
     
-    const txRes = await fetch(`${LCD}/cosmos/tx/v1beta1/txs?events=transfer.recipient='${walletAddress}'&order_by=ORDER_BY_DESC&pagination.limit=20`);
+    // Gunakan query transfer.recipient DAN transfer.sender untuk history lengkap
+    const txRes = await fetch(`${LCD}/cosmos/tx/v1beta1/txs?events=transfer.recipient='${walletAddress}'&order_by=ORDER_BY_DESC&pagination.limit=10`, { signal: controller.signal });
     const txData = await txRes.json();
+    
+    clearTimeout(timeout);
     
     res.json({
       success: true,
       walletAddress,
       balances: balanceData.balances || [],
-      transactions: txData.txs || [],
+      transactions: txData.tx_responses || [], // Paxinet/Cosmos biasanya menggunakan tx_responses
       totalTxs: txData.pagination?.total || 0
     });
   } catch (e) {
+    console.error("Blockchain Fetch Error:", e);
     res.json({
       success: true,
       walletAddress,
       balances: [],
       transactions: [],
-      totalTxs: 0,
-      fetchError: e.message
+      fetchError: "Gagal mengambil data dari RPC/LCD Paxinet"
     });
   }
 });
+
 
 app.post('/api/proposals', async (req, res) => {
   const { sessionToken } = req.body;
@@ -495,6 +512,17 @@ io.on('connection', (socket) => {
             wallet_generated: true,
             wallet_paxi_address: account.address
           });
+          
+          // UPDATE DATABASE DENGAN ALAMAT YANG BENAR
+          await updateState({
+            wallet_generated: true,
+            wallet_paxi_address: account.address, // Penting agar API wallet-info tahu alamat mana yang diquery
+            updated_at: new Date()
+          });
+          
+          // Beritahu frontend untuk refresh data
+          socket.emit('import-success', { address: account.address });
+          
         }
       }
       
