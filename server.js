@@ -225,6 +225,12 @@ async function executeProposal(proposal) {
     case 'burn_token':
       result = await executeBurnToken(mnemonic, actionData);
       break;
+    case 'add_liquidity':
+      result = await executeAddLiquidity(mnemonic, actionData);
+      break;
+    case 'remove_liquidity':
+      result = await executeRemoveLiquidity(mnemonic, actionData);
+      break;
     case 'update_metadata':
       result = await executeUpdateMetadata(mnemonic, actionData);
       break;
@@ -317,6 +323,63 @@ async function executeBurnToken(mnemonic, data) {
   
   return { txHash: result.transactionHash };
 }
+
+async function executeAddLiquidity(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  // 1. Berikan Izin (Allowance) ke Kontrak DEX untuk token CW20
+  const msgAllowance = {
+    increase_allowance: {
+      spender: data.pairAddress,
+      amount: data.tokenAmount,
+      expires: { never: {} }
+    }
+  };
+  await client.execute(account.address, data.tokenContract, msgAllowance, "auto");
+  
+  // 2. Kirim Likuiditas (Contoh standar DEX: token + native coin)
+  const msgAddLp = {
+    provide_liquidity: {
+      assets: [
+        { info: { token: { contract_addr: data.tokenContract } }, amount: data.tokenAmount },
+        { info: { native_token: { denom: "upaxi" } }, amount: data.paxiAmount }
+      ],
+      slippage_tolerance: "0.01" // 1%
+    }
+  };
+  
+  // Jika menyertakan koin native (PAXI), kirim di funds
+  const funds = [{ denom: "upaxi", amount: data.paxiAmount }];
+  const result = await client.execute(account.address, data.pairAddress, msgAddLp, "auto", "", funds);
+  
+  return { txHash: result.transactionHash };
+}
+
+async function executeRemoveLiquidity(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  // Di DEX berbasis CW20, WD LP biasanya dilakukan dengan mengirim LP token 
+  // kembali ke kontrak pair dengan instruksi 'withdraw_liquidity'
+  const msgRemove = {
+    send: {
+      contract: data.pairAddress,
+      amount: data.lpTokenAmount,
+      msg: btoa(JSON.stringify({ withdraw_liquidity: {} })) // Encode base64
+    }
+  };
+  
+  const result = await client.execute(account.address, data.lpTokenContract, msgRemove, "auto");
+  return { txHash: result.transactionHash };
+}
+
 
 async function executeUpdateMetadata(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
@@ -507,11 +570,6 @@ io.on('connection', (socket) => {
           
           const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
           const [account] = await wallet.getAccounts();
-          
-          await updateState({
-            wallet_generated: true,
-            wallet_paxi_address: account.address
-          });
           
           // UPDATE DATABASE DENGAN ALAMAT YANG BENAR
           await updateState({
