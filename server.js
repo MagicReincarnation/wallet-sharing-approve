@@ -443,6 +443,64 @@ app.get('/health', (req, res) => res.json({ status: 'OK' }));
 // ===== SOCKET.IO =====
 
 io.on('connection', (socket) => {
+  
+  socket.on('import-share', async (data) => {
+    if (!socket.devAddress) return socket.emit('import-failed', 'Not authenticated');
+    
+    try {
+      const { share } = data;
+      if (!share) return socket.emit('import-failed', 'Share is empty');
+
+      let state = await getState();
+      
+      // Ambil shares yang sudah ada di database, atau buat objek baru jika kosong
+      const currentShares = state.shares || {};
+      
+      // Simpan share dev ini ke database
+      currentShares[socket.devAddress] = share;
+      
+      // Update database
+      await updateState({ 
+        shares: currentShares,
+        // Jika dev mengimport, otomatis dia dianggap sudah menyetujui (approvals)
+        approvals: Array.from(new Set([...state.approvals, socket.devAddress]))
+      });
+
+      // Cek apakah dengan import ini, semua share (5/5) sudah terkumpul
+      const totalCollected = Object.keys(currentShares).length;
+      
+      if (totalCollected >= AUTHORIZED_DEVS.length && !state.wallet_generated) {
+        // Jika semua sudah kumpul tapi status masih false, pulihkan status wallet
+        // Kita butuh mnemonic untuk mendapatkan kembali alamat paxi-nya
+        const mnemonicHex = secrets.combine(Object.values(currentShares));
+        const mnemonic = Buffer.from(mnemonicHex, 'hex').toString();
+        const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+        const [account] = await wallet.getAccounts();
+
+        await updateState({
+          wallet_generated: true,
+          wallet_paxi_address: account.address
+        });
+      }
+
+      socket.emit('import-success');
+      
+      // Update semua orang tentang status terbaru
+      const updatedState = await getState();
+      io.emit('update-state', {
+        approvals: updatedState.approvals,
+        totalApprovals: updatedState.approvals.length,
+        required: AUTHORIZED_DEVS.length,
+        walletGenerated: updatedState.wallet_generated,
+        paxiAddress: updatedState.wallet_paxi_address
+      });
+
+    } catch (e) {
+      console.error('Import Error:', e);
+      socket.emit('import-failed', 'Invalid share format or error: ' + e.message);
+    }
+  });
+  
   socket.on('authenticate', async (token) => {
     const session = sessions.get(token);
     if (!session) return socket.emit('auth-failed');
