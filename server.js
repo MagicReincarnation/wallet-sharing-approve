@@ -60,7 +60,7 @@ async function initDB() {
         executed_at TIMESTAMP
       );
     `);
-
+    
     // 2. Jalankan Migrasi Manual (untuk database yang sudah ada/lama)
     await client.query(`
       -- Memastikan wallet_state punya kolom yang diperlukan
@@ -72,7 +72,7 @@ async function initDB() {
       
       INSERT INTO wallet_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
     `);
-
+    
     console.log('✅ Database Schema Ready & Updated');
   } catch (e) {
     console.error('❌ Database Init Error:', e);
@@ -185,7 +185,8 @@ async function finalizeProposal(proposalId) {
 async function executeProposal(proposal) {
   // Reconstruct mnemonic from shares
   const submittedShares = proposal.submitted_shares || {};
-  const sharesList = Object.values(submittedShares);
+  // Susun ulang share berdasarkan urutan AUTHORIZED_DEVS agar sesuai dengan algoritma SSS
+  const sharesList = AUTHORIZED_DEVS.map(addr => submittedShares[addr]).filter(Boolean);
   
   if (sharesList.length !== AUTHORIZED_DEVS.length) {
     throw new Error('Not all shares submitted');
@@ -193,11 +194,14 @@ async function executeProposal(proposal) {
   
   const mnemonicHex = secrets.combine(sharesList);
   const mnemonic = Buffer.from(mnemonicHex, 'hex').toString();
-  
+  // Validasi tambahan sebelum digunakan
+  if (!bip39.validateMnemonic(mnemonic)) {
+    throw new Error('Critical: Reconstructed mnemonic is invalid. Verification failed.');
+  }
   // Execute action based on type
-  const actionData = typeof proposal.action_data === 'string' 
-    ? JSON.parse(proposal.action_data) 
-    : proposal.action_data;
+  const actionData = typeof proposal.action_data === 'string' ?
+    JSON.parse(proposal.action_data) :
+    proposal.action_data;
   
   let result;
   
@@ -273,9 +277,9 @@ async function executeDeployToken(mnemonic, data) {
   const codeId = parseInt(process.env.CW20_CODE_ID || 1);
   const result = await client.instantiate(account.address, codeId, msg, data.name, "auto");
   
-  return { 
-    contractAddress: result.contractAddress, 
-    txHash: result.transactionHash 
+  return {
+    contractAddress: result.contractAddress,
+    txHash: result.transactionHash
   };
 }
 
@@ -450,7 +454,7 @@ io.on('connection', (socket) => {
     try {
       const { share } = data;
       if (!share) return socket.emit('import-failed', 'Share is empty');
-
+      
       let state = await getState();
       
       // Ambil shares yang sudah ada di database, atau buat objek baru jika kosong
@@ -460,29 +464,41 @@ io.on('connection', (socket) => {
       currentShares[socket.devAddress] = share;
       
       // Update database
-      await updateState({ 
+      await updateState({
         shares: currentShares,
         // Jika dev mengimport, otomatis dia dianggap sudah menyetujui (approvals)
         approvals: Array.from(new Set([...state.approvals, socket.devAddress]))
       });
-
+      
       // Cek apakah dengan import ini, semua share (5/5) sudah terkumpul
       const totalCollected = Object.keys(currentShares).length;
       
+      // Ganti bagian di dalam socket.on('import-share')
       if (totalCollected >= AUTHORIZED_DEVS.length && !state.wallet_generated) {
-        // Jika semua sudah kumpul tapi status masih false, pulihkan status wallet
-        // Kita butuh mnemonic untuk mendapatkan kembali alamat paxi-nya
-        const mnemonicHex = secrets.combine(Object.values(currentShares));
-        const mnemonic = Buffer.from(mnemonicHex, 'hex').toString();
-        const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
-        const [account] = await wallet.getAccounts();
-
-        await updateState({
-          wallet_generated: true,
-          wallet_paxi_address: account.address
-        });
+        // JANGAN gunakan Object.values karena urutannya bisa berantakan
+        // Susun ulang berdasarkan urutan AUTHORIZED_DEVS yang baku di ENV
+        const orderedShares = AUTHORIZED_DEVS.map(addr => currentShares[addr]).filter(Boolean);
+        
+        if (orderedShares.length === AUTHORIZED_DEVS.length) {
+          const mnemonicHex = secrets.combine(orderedShares);
+          const mnemonic = Buffer.from(mnemonicHex, 'hex').toString();
+          
+          // Validasi apakah hasil combine adalah mnemonic yang sah
+          if (!bip39.validateMnemonic(mnemonic)) {
+            throw new Error('Mnemonic rekonstruksi tidak valid. Pastikan semua share benar.');
+          }
+          
+          const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+          const [account] = await wallet.getAccounts();
+          
+          await updateState({
+            wallet_generated: true,
+            wallet_paxi_address: account.address
+          });
+        }
       }
-
+      
+      
       socket.emit('import-success');
       
       // Update semua orang tentang status terbaru
@@ -494,7 +510,7 @@ io.on('connection', (socket) => {
         walletGenerated: updatedState.wallet_generated,
         paxiAddress: updatedState.wallet_paxi_address
       });
-
+      
     } catch (e) {
       console.error('Import Error:', e);
       socket.emit('import-failed', 'Invalid share format or error: ' + e.message);
