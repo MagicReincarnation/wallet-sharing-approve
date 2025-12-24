@@ -7,11 +7,12 @@ const secrets = require('secrets.js-grempe');
 const { Pool } = require('pg');
 const cors = require('cors');
 const { DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
+const { SigningCosmWasmClient } = require("@cosmjs/cosmwasm-stargate");
+const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
 
 const app = express();
 const server = http.createServer(app);
 
-// Konfigurasi CORS
 const io = socketIO(server, {
   cors: {
     origin: process.env.FRONTEND_URL || "*",
@@ -22,13 +23,12 @@ const io = socketIO(server, {
 app.use(cors());
 app.use(express.json());
 
-// ===== DATABASE CONNECTION =====
+// ===== DATABASE =====
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Initialize database schema
 async function initDB() {
   const client = await pool.connect();
   try {
@@ -44,11 +44,25 @@ async function initDB() {
         updated_at TIMESTAMP DEFAULT NOW(),
         CONSTRAINT single_row CHECK (id = 1)
       );
+      
+      CREATE TABLE IF NOT EXISTS proposals (
+        id SERIAL PRIMARY KEY,
+        proposal_id TEXT UNIQUE NOT NULL,
+        proposer TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        action_data JSONB NOT NULL,
+        status TEXT DEFAULT 'pending',
+        votes JSONB DEFAULT '{}',
+        submitted_shares JSONB DEFAULT '{}',
+        execution_result JSONB,
+        created_at TIMESTAMP DEFAULT NOW(),
+        executed_at TIMESTAMP
+      );
+      
       INSERT INTO wallet_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+      ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS wallet_paxi_address TEXT;
     `);
-    // Cek kolom jika migrasi diperlukan
-    await client.query(`ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS wallet_paxi_address TEXT;`);
-    console.log('✅ Database Schema Synced');
+    console.log('✅ Database Schema Ready');
   } catch (e) {
     console.error('❌ Database Init Error:', e);
   } finally {
@@ -57,10 +71,10 @@ async function initDB() {
 }
 initDB();
 
-// ===== WHITELIST DEVS =====
-const AUTHORIZED_DEVS = (process.env.DEV_ADDRESSES || '').split(',').map(a => a.trim()).filter(a => a !== '');
-
-// In-memory sessions
+// ===== CONFIG =====
+const AUTHORIZED_DEVS = (process.env.DEV_ADDRESSES || '').split(',').map(a => a.trim()).filter(Boolean);
+const RPC = 'https://mainnet-rpc.paxinet.io';
+const LCD = 'https://mainnet-lcd.paxinet.io';
 const sessions = new Map();
 
 // ===== HELPERS =====
@@ -76,12 +90,257 @@ async function updateState(updates) {
   await pool.query(`UPDATE wallet_state SET ${setQuery}, updated_at = NOW() WHERE id = 1`, values);
 }
 
+// ===== GOVERNANCE FUNCTIONS =====
+
+async function createProposal(proposer, actionType, actionData) {
+  const proposalId = crypto.randomBytes(16).toString('hex');
+  
+  await pool.query(`
+    INSERT INTO proposals (proposal_id, proposer, action_type, action_data, votes, submitted_shares)
+    VALUES ($1, $2, $3, $4, $5, $6)
+  `, [proposalId, proposer, actionType, JSON.stringify(actionData), JSON.stringify({}), JSON.stringify({})]);
+  
+  return proposalId;
+}
+
+async function voteProposal(proposalId, voter, vote, share = null) {
+  const result = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
+  if (result.rows.length === 0) throw new Error('Proposal not found');
+  
+  const proposal = result.rows[0];
+  if (proposal.status !== 'pending') throw new Error('Proposal already finalized');
+  
+  const votes = proposal.votes || {};
+  const submittedShares = proposal.submitted_shares || {};
+  
+  votes[voter] = vote;
+  if (share && vote === 'approve') {
+    submittedShares[voter] = share;
+  }
+  
+  await pool.query(`
+    UPDATE proposals 
+    SET votes = $1, submitted_shares = $2, updated_at = NOW()
+    WHERE proposal_id = $3
+  `, [JSON.stringify(votes), JSON.stringify(submittedShares), proposalId]);
+  
+  // Check if all voted
+  const totalVotes = Object.keys(votes).length;
+  if (totalVotes === AUTHORIZED_DEVS.length) {
+    await finalizeProposal(proposalId);
+  }
+  
+  return { votes, totalVotes, required: AUTHORIZED_DEVS.length };
+}
+
+async function finalizeProposal(proposalId) {
+  const result = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
+  const proposal = result.rows[0];
+  
+  const votes = proposal.votes || {};
+  const allApproved = Object.values(votes).every(v => v === 'approve');
+  
+  if (!allApproved) {
+    await pool.query(`
+      UPDATE proposals SET status = 'rejected', executed_at = NOW() WHERE proposal_id = $1
+    `, [proposalId]);
+    
+    io.emit('proposal-finalized', { proposalId, status: 'rejected', reason: 'Not all devs approved' });
+    return;
+  }
+  
+  // All approved, execute action
+  try {
+    const executionResult = await executeProposal(proposal);
+    
+    await pool.query(`
+      UPDATE proposals 
+      SET status = 'executed', execution_result = $1, executed_at = NOW()
+      WHERE proposal_id = $2
+    `, [JSON.stringify(executionResult), proposalId]);
+    
+    io.emit('proposal-finalized', { proposalId, status: 'executed', result: executionResult });
+  } catch (e) {
+    await pool.query(`
+      UPDATE proposals SET status = 'failed', execution_result = $1, executed_at = NOW()
+      WHERE proposal_id = $2
+    `, [JSON.stringify({ error: e.message }), proposalId]);
+    
+    io.emit('proposal-finalized', { proposalId, status: 'failed', error: e.message });
+  }
+}
+
+async function executeProposal(proposal) {
+  // Reconstruct mnemonic from shares
+  const submittedShares = proposal.submitted_shares || {};
+  const sharesList = Object.values(submittedShares);
+  
+  if (sharesList.length !== AUTHORIZED_DEVS.length) {
+    throw new Error('Not all shares submitted');
+  }
+  
+  const mnemonicHex = secrets.combine(sharesList);
+  const mnemonic = Buffer.from(mnemonicHex, 'hex').toString();
+  
+  // Execute action based on type
+  const actionData = typeof proposal.action_data === 'string' 
+    ? JSON.parse(proposal.action_data) 
+    : proposal.action_data;
+  
+  let result;
+  
+  switch (proposal.action_type) {
+    case 'send':
+      result = await executeSend(mnemonic, actionData);
+      break;
+    case 'deploy_token':
+      result = await executeDeployToken(mnemonic, actionData);
+      break;
+    case 'mint_token':
+      result = await executeMintToken(mnemonic, actionData);
+      break;
+    case 'burn_token':
+      result = await executeBurnToken(mnemonic, actionData);
+      break;
+    case 'update_metadata':
+      result = await executeUpdateMetadata(mnemonic, actionData);
+      break;
+    case 'renounce_minter':
+      result = await executeRenounceMinter(mnemonic, actionData);
+      break;
+    default:
+      throw new Error('Unknown action type');
+  }
+  
+  // IMPORTANT: Destroy mnemonic from memory
+  // (JavaScript garbage collection will handle this, but explicit clear)
+  return result;
+}
+
+// ===== EXECUTION FUNCTIONS =====
+
+async function executeSend(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const amount = { denom: data.denom || 'upaxi', amount: data.amount };
+  const result = await client.sendTokens(account.address, data.recipient, [amount], "auto", data.memo || "");
+  
+  return { txHash: result.transactionHash, height: result.height };
+}
+
+async function executeDeployToken(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const totalSupply = (BigInt(data.totalSupply) * BigInt(Math.pow(10, data.decimals || 6))).toString();
+  
+  const msg = {
+    name: data.name,
+    symbol: data.symbol,
+    decimals: parseInt(data.decimals || 6),
+    initial_balances: [{ address: account.address, amount: totalSupply }],
+    mint: { minter: account.address },
+    marketing: {
+      project: data.name,
+      description: data.description || "",
+      marketing: account.address
+    }
+  };
+  
+  if (data.logoUrl) msg.marketing.logo = { url: data.logoUrl };
+  
+  const codeId = parseInt(process.env.CW20_CODE_ID || 1);
+  const result = await client.instantiate(account.address, codeId, msg, data.name, "auto");
+  
+  return { 
+    contractAddress: result.contractAddress, 
+    txHash: result.transactionHash 
+  };
+}
+
+async function executeMintToken(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const msg = { mint: { recipient: data.recipient, amount: data.amount } };
+  const result = await client.execute(account.address, data.contractAddress, msg, "auto");
+  
+  return { txHash: result.transactionHash };
+}
+
+async function executeBurnToken(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const msg = { burn: { amount: data.amount } };
+  const result = await client.execute(account.address, data.contractAddress, msg, "auto");
+  
+  return { txHash: result.transactionHash };
+}
+
+async function executeUpdateMetadata(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const msg = {
+    update_marketing: {
+      project: data.project || null,
+      description: data.description || null,
+      marketing: null
+    }
+  };
+  
+  const result = await client.execute(account.address, data.contractAddress, msg, "auto");
+  
+  if (data.logoUrl) {
+    const logoMsg = { upload_logo: { url: data.logoUrl } };
+    await client.execute(account.address, data.contractAddress, logoMsg, "auto");
+  }
+  
+  return { txHash: result.transactionHash };
+}
+
+async function executeRenounceMinter(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const msg = { update_minter: { new_minter: null } };
+  const result = await client.execute(account.address, data.contractAddress, msg, "auto");
+  
+  return { txHash: result.transactionHash };
+}
+
 // ===== API ENDPOINTS =====
 
-app.post('/api/verify-dev', async (req, res) => {
+app.post('/api/verify-dev', (req, res) => {
   const { address } = req.body;
   if (!AUTHORIZED_DEVS.includes(address)) {
-    return res.status(403).json({ success: false, error: 'Unauthorized Dev Address' });
+    return res.status(403).json({ success: false, error: 'Unauthorized' });
   }
   const sessionToken = crypto.randomBytes(32).toString('hex');
   sessions.set(sessionToken, { address, timestamp: Date.now() });
@@ -92,30 +351,93 @@ app.post('/api/wallet-status', async (req, res) => {
   const { sessionToken } = req.body;
   const session = sessions.get(sessionToken);
   if (!session) return res.status(401).json({ success: false, error: 'Session Expired' });
+  
+  const state = await getState();
+  res.json({
+    success: true,
+    walletGenerated: state.wallet_generated,
+    paxiAddress: state.wallet_paxi_address,
+    hasClaimed: (state.claimed_by || []).includes(session.address)
+  });
+});
 
+app.post('/api/wallet-info', async (req, res) => {
+  const { sessionToken } = req.body;
+  const session = sessions.get(sessionToken);
+  if (!session) return res.json({ success: false, error: 'Invalid session' });
+  
+  const state = await getState();
+  if (!state.wallet_generated || !state.wallet_paxi_address) {
+    return res.json({ success: false, error: 'Wallet not generated yet' });
+  }
+  
+  const walletAddress = state.wallet_paxi_address;
+  
   try {
-    const state = await getState();
+    const balanceRes = await fetch(`${LCD}/cosmos/bank/v1beta1/balances/${walletAddress}`);
+    const balanceData = await balanceRes.json();
+    
+    const txRes = await fetch(`${LCD}/cosmos/tx/v1beta1/txs?events=transfer.recipient='${walletAddress}'&order_by=ORDER_BY_DESC&pagination.limit=20`);
+    const txData = await txRes.json();
+    
     res.json({
       success: true,
-      walletGenerated: state.wallet_generated,
-      paxiAddress: state.wallet_paxi_address,
-      hasClaimed: (state.claimed_by || []).includes(session.address)
+      walletAddress,
+      balances: balanceData.balances || [],
+      transactions: txData.txs || [],
+      totalTxs: txData.pagination?.total || 0
     });
   } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    res.json({
+      success: true,
+      walletAddress,
+      balances: [],
+      transactions: [],
+      totalTxs: 0,
+      fetchError: e.message
+    });
   }
 });
 
-// ===== SOCKET LOGIC =====
+app.post('/api/proposals', async (req, res) => {
+  const { sessionToken } = req.body;
+  const session = sessions.get(sessionToken);
+  if (!session) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  
+  const result = await pool.query(`
+    SELECT proposal_id, proposer, action_type, action_data, status, votes, created_at, executed_at
+    FROM proposals
+    ORDER BY created_at DESC
+    LIMIT 50
+  `);
+  
+  res.json({ success: true, proposals: result.rows });
+});
+
+app.post('/api/proposal/:id', async (req, res) => {
+  const { id } = req.params;
+  const { sessionToken } = req.body;
+  const session = sessions.get(sessionToken);
+  if (!session) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  
+  const result = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [id]);
+  if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Not found' });
+  
+  res.json({ success: true, proposal: result.rows[0] });
+});
+
+app.get('/health', (req, res) => res.json({ status: 'OK' }));
+
+// ===== SOCKET.IO =====
 
 io.on('connection', (socket) => {
   socket.on('authenticate', async (token) => {
     const session = sessions.get(token);
     if (!session) return socket.emit('auth-failed');
-
+    
     socket.devAddress = session.address;
     socket.emit('auth-success', { address: session.address });
-
+    
     const state = await getState();
     socket.emit('update-state', {
       approvals: state.approvals,
@@ -125,102 +447,100 @@ io.on('connection', (socket) => {
       paxiAddress: state.wallet_paxi_address
     });
   });
-
+  
   socket.on('submit-approval', async () => {
     if (!socket.devAddress) return;
-    try {
-      let state = await getState();
-      if (state.wallet_generated) return socket.emit('error-message', 'Wallet sudah dibuat');
-
-      const approvals = new Set(state.approvals);
-      approvals.add(socket.devAddress);
-      
-      const newApprovals = Array.from(approvals);
-      await updateState({ approvals: newApprovals });
-
-      io.emit('update-state', { 
-        approvals: newApprovals, 
-        totalApprovals: newApprovals.length, 
-        required: AUTHORIZED_DEVS.length 
-      });
-
-      if (newApprovals.length >= AUTHORIZED_DEVS.length) {
-        await generateMultisigWallet();
-      }
-    } catch (e) { console.error(e); }
+    let state = await getState();
+    if (state.wallet_generated) return socket.emit('error-message', 'Wallet already generated');
+    
+    const approvals = new Set(state.approvals);
+    approvals.add(socket.devAddress);
+    const newApprovals = Array.from(approvals);
+    await updateState({ approvals: newApprovals });
+    
+    io.emit('update-state', {
+      approvals: newApprovals,
+      totalApprovals: newApprovals.length,
+      required: AUTHORIZED_DEVS.length
+    });
+    
+    if (newApprovals.length >= AUTHORIZED_DEVS.length) {
+      await generateMultisigWallet();
+    }
   });
-
+  
   socket.on('request-share', async () => {
     if (!socket.devAddress) return;
     const state = await getState();
     if (!state.wallet_generated) return;
-
+    
     const share = state.shares[socket.devAddress];
-    if (!share) return socket.emit('error-message', 'Share tidak ditemukan');
-
+    if (!share) return socket.emit('error-message', 'Share not found');
+    
     if (!state.claimed_by.includes(socket.devAddress)) {
       await updateState({ claimed_by: [...state.claimed_by, socket.devAddress] });
     }
-
-    socket.emit('receive-share', { 
-      share, 
-      claimCount: state.claimed_by.length, 
-      totalDevs: AUTHORIZED_DEVS.length 
+    
+    socket.emit('receive-share', {
+      share,
+      claimCount: state.claimed_by.length,
+      totalDevs: AUTHORIZED_DEVS.length
     });
+  });
+  
+  // GOVERNANCE EVENTS
+  socket.on('create-proposal', async (data) => {
+    if (!socket.devAddress) return socket.emit('error-message', 'Not authenticated');
+    
+    try {
+      const proposalId = await createProposal(socket.devAddress, data.actionType, data.actionData);
+      io.emit('new-proposal', { proposalId, proposer: socket.devAddress, actionType: data.actionType });
+      socket.emit('proposal-created', { success: true, proposalId });
+    } catch (e) {
+      socket.emit('error-message', e.message);
+    }
+  });
+  
+  socket.on('vote-proposal', async (data) => {
+    if (!socket.devAddress) return socket.emit('error-message', 'Not authenticated');
+    
+    try {
+      const voteResult = await voteProposal(data.proposalId, socket.devAddress, data.vote, data.share);
+      io.emit('proposal-voted', { proposalId: data.proposalId, voter: socket.devAddress, vote: data.vote, ...voteResult });
+    } catch (e) {
+      socket.emit('error-message', e.message);
+    }
   });
 });
 
-// ===== CORE GENERATOR =====
-
 async function generateMultisigWallet() {
-  try {
-    const state = await getState();
-    if (state.wallet_generated) return;
-
-    // 1. Generate Mnemonic
-    const mnemonic = bip39.generateMnemonic(256);
-    
-    // 2. Derive Paxi Address
-    const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
-    const [account] = await wallet.getAccounts();
-    const paxiAddress = account.address;
-
-    // 3. Shamir Secret Sharing
-    const mnemonicHex = Buffer.from(mnemonic).toString('hex');
-    const sharesList = secrets.share(mnemonicHex, AUTHORIZED_DEVS.length, AUTHORIZED_DEVS.length);
-    
-    const sharesMap = {};
-    AUTHORIZED_DEVS.forEach((addr, i) => { sharesMap[addr] = sharesList[i]; });
-
-    // 4. Save to DB
-    await updateState({
-      wallet_generated: true,
-      wallet_paxi_address: paxiAddress,
-      shares: sharesMap,
-      generation_timestamp: Date.now()
-    });
-
-    io.emit('wallet-created', { paxiAddress });
-    io.emit('update-state', { 
-        walletGenerated: true, 
-        paxiAddress: paxiAddress,
-        approvals: AUTHORIZED_DEVS,
-        totalApprovals: AUTHORIZED_DEVS.length,
-        required: AUTHORIZED_DEVS.length
-    });
-
-    console.log(`✅ Multisig Wallet Created: ${paxiAddress}`);
-  } catch (e) {
-    console.error('❌ Generation Critical Error:', e);
-  }
+  const state = await getState();
+  if (state.wallet_generated) return;
+  
+  const mnemonic = bip39.generateMnemonic(256);
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  const paxiAddress = account.address;
+  
+  const mnemonicHex = Buffer.from(mnemonic).toString('hex');
+  const sharesList = secrets.share(mnemonicHex, AUTHORIZED_DEVS.length, AUTHORIZED_DEVS.length);
+  
+  const sharesMap = {};
+  AUTHORIZED_DEVS.forEach((addr, i) => { sharesMap[addr] = sharesList[i]; });
+  
+  await updateState({
+    wallet_generated: true,
+    wallet_paxi_address: paxiAddress,
+    shares: sharesMap,
+    generation_timestamp: Date.now()
+  });
+  
+  io.emit('wallet-created', { paxiAddress });
+  console.log(`✅ Multisig Wallet: ${paxiAddress}`);
 }
 
-app.get('/', (req, res) => {
-  res.status(200).send('OK'); // Respon wajib 200 agar Healthcheck sukses
-});
-
-// Pastikan listen menggunakan 0.0.0.0
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Governance Server on port ${PORT}`);
+  console.log(`👥 Authorized Devs: ${AUTHORIZED_DEVS.length}`);
 });
