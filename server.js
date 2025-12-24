@@ -32,6 +32,7 @@ const pool = new Pool({
 async function initDB() {
   const client = await pool.connect();
   try {
+    // 1. Jalankan Create Table (untuk database baru)
     await client.query(`
       CREATE TABLE IF NOT EXISTS wallet_state (
         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -58,17 +59,28 @@ async function initDB() {
         created_at TIMESTAMP DEFAULT NOW(),
         executed_at TIMESTAMP
       );
+    `);
+
+    // 2. Jalankan Migrasi Manual (untuk database yang sudah ada/lama)
+    await client.query(`
+      -- Memastikan wallet_state punya kolom yang diperlukan
+      ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS wallet_paxi_address TEXT;
+      ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+      
+      -- Memastikan proposals punya kolom updated_at (INI YANG KURANG TADI)
+      ALTER TABLE proposals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
       
       INSERT INTO wallet_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
-      ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS wallet_paxi_address TEXT;
     `);
-    console.log('✅ Database Schema Ready');
+
+    console.log('✅ Database Schema Ready & Updated');
   } catch (e) {
     console.error('❌ Database Init Error:', e);
   } finally {
     client.release();
   }
 }
+
 initDB();
 
 // ===== CONFIG =====
