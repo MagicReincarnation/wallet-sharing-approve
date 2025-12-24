@@ -215,8 +215,12 @@ async function generateMultisigWallet() {
   }
 }
 
-// ===== PORT =====
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 Paxi Multi-Dev Server v2.0 running on port ${PORT}`);
+app.get('/', (req, res) => {
+  res.status(200).send('OK'); // Respon wajib 200 agar Healthcheck sukses
+});
+
+// Pastikan listen menggunakan 0.0.0.0
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
