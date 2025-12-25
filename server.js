@@ -172,7 +172,7 @@ async function finalizeProposal(proposalId) {
           executed_at = NOW()
       WHERE proposal_id = $3
     `, [
-      JSON.stringify(executionResult), 
+      JSON.stringify(executionResult),
       JSON.stringify({ status: "developer is approve this proposal" }), // Teks pengganti
       proposalId
     ]);
@@ -182,7 +182,7 @@ async function finalizeProposal(proposalId) {
       status: 'executed',
       txHash: executionResult.txHash
     });
-
+    
   } catch (e) {
     console.error("Execution Error:", e);
     await pool.query(`
@@ -219,6 +219,9 @@ async function executeProposal(proposal) {
   switch (proposal.action_type) {
     case 'send':
       result = await executeSend(mnemonic, actionData);
+      break;
+    case 'send_token':
+      result = await executeSendToken(mnemonic, actionData);
       break;
     case 'deploy_token':
       result = await executeDeployToken(mnemonic, actionData);
@@ -264,6 +267,25 @@ async function executeSend(mnemonic, data) {
   const result = await client.sendTokens(account.address, data.recipient, [amount], "auto", data.memo || "");
   
   return { txHash: result.transactionHash, height: result.height };
+}
+
+async function executeSendToken(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const msg = {
+    transfer: {
+      recipient: data.recipient,
+      amount: (parseFloat(data.amount) * 1_000_000).toString()
+    }
+  };
+  
+  const result = await client.execute(account.address, data.contractAddress, msg, "auto");
+  
+  return { txHash: result.transactionHash };
 }
 
 async function executeDeployToken(mnemonic, data) {
@@ -352,7 +374,7 @@ async function executeAddLiquidity(mnemonic, data) {
         { info: { token: { contract_addr: data.tokenContract } }, amount: data.tokenAmount },
         { info: { native_token: { denom: "upaxi" } }, amount: data.paxiAmount }
       ],
-      slippage_tolerance: "0.01" // 1%
+      slippage_tolerance: data.slippage ?? "0.01"
     }
   };
   
@@ -370,20 +392,37 @@ async function executeRemoveLiquidity(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  // Di DEX berbasis CW20, WD LP biasanya dilakukan dengan mengirim LP token 
-  // kembali ke kontrak pair dengan instruksi 'withdraw_liquidity'
+  // 1. Get LP token address from pair
+  const pairQuery = { pool: {} };
+  const pairInfo = await client.queryContractSmart(data.pairAddress, pairQuery);
+  const lpTokenAddr = pairInfo.lp_token_supply?.address || pairInfo.lp_token_address;
+  
+  // 2. Get current LP balance
+  const balanceQuery = { balance: { address: account.address } };
+  const balanceRes = await client.queryContractSmart(lpTokenAddr, balanceQuery);
+  const lpBalance = balanceRes.balance;
+  
+  // 3. Calculate amount based on percentage
+  const percent = data.percent || 100;
+  const finalAmount = (BigInt(lpBalance) * BigInt(percent) / 100n).toString();
+  
+  // 4. Execute withdrawal
   const msgRemove = {
     send: {
       contract: data.pairAddress,
-      amount: data.lpTokenAmount,
-      msg: btoa(JSON.stringify({ withdraw_liquidity: {} })) // Encode base64
+      amount: finalAmount,
+      msg: btoa(JSON.stringify({ withdraw_liquidity: {} }))
     }
   };
   
-  const result = await client.execute(account.address, data.lpTokenContract, msgRemove, "auto");
-  return { txHash: result.transactionHash };
+  const result = await client.execute(account.address, lpTokenAddr, msgRemove, "auto");
+  
+  return {
+    txHash: result.transactionHash,
+    lpWithdrawn: finalAmount,
+    percentage: percent
+  };
 }
-
 
 async function executeUpdateMetadata(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
@@ -392,7 +431,7 @@ async function executeUpdateMetadata(mnemonic, data) {
   const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
-
+  
   // 1. Update Info Marketing Dasar
   // Catatan: Jika field bernilai null, biasanya kontrak tidak akan mengubah nilai lama.
   const updateMarketingMsg = {
@@ -418,7 +457,7 @@ async function executeUpdateMetadata(mnemonic, data) {
     await client.execute(account.address, data.contractAddress, uploadLogoMsg, "auto");
   }
   
-  return { 
+  return {
     txHash: res1.transactionHash,
     status: "success",
     updatedFields: {
