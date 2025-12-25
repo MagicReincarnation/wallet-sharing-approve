@@ -12,11 +12,6 @@ const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
 // import Any protobuf (wajib untuk kirim msg module)
 const { Any } = require("cosmjs-types/google/protobuf/any");
 
-// import protobuf MsgAddLiquidity dari module swap Paxi
-// ⚠️ path ini HARUS sesuai dengan repo proto Paxi kamu
-const { MsgAddLiquidity } = require("paxi-types/x/swap/tx");
-
-
 const app = express();
 const server = http.createServer(app);
 
@@ -109,9 +104,6 @@ const AUTHORIZED_DEVS = (process.env.DEV_ADDRESSES || '').split(',').map(a => a.
 const RPC = 'https://mainnet-rpc.paxinet.io';
 const LCD = 'https://mainnet-lcd.paxinet.io';
 const sessions = new Map();
-
-// ===== SWAP MODULE ADDRESS (untuk add liquidity) =====
-const SWAP_MODULE_ADDRESS = process.env.SWAP_MODULE_ADDRESS || "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
 
 // ===== HELPERS =====
 async function getState() {
@@ -384,64 +376,44 @@ async function executeBurnToken(mnemonic, data) {
 
 // ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
 // ===== EXECUTE ADD LIQUIDITY (Paxi Swap Module) =====
-// ===== FUNCTION ADD LIQUIDITY =====
-async function executeAddLiquidity(mnemonic, data) {
-
-  // buat wallet dari mnemonic
-  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(
-    mnemonic,
-    { prefix: "paxi" }
-  );
-
-  // ambil address pertama
+async function executeAddLiquidityModule(mnemonic, data) {
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
+    prefix: "paxi",
+  });
   const [account] = await wallet.getAccounts();
 
-  // connect ke RPC menggunakan StargateClient (module)
   const client = await SigningStargateClient.connectWithSigner(
     RPC,
     wallet,
     { gasPrice: GasPrice.fromString("0.05upaxi") }
   );
 
-  /**
-   * data dari proposal:
-   * {
-   *   tokenContract: "paxi1xxxx",
-   *   tokenAmount: "50000",   // human readable
-   *   paxiAmount:  "1000000"  // upaxi (base unit)
-   * }
-   */
+  const msg = {
+    typeUrl: "/paxi.swap.v1.MsgAddLiquidity", // ⬅️ TYPEURL, BUKAN IMPORT
+    value: {
+      creator: account.address,
+      tokenContract: data.tokenContract,
+      paxiAmount: data.paxiAmount,
+      tokenAmount: data.tokenAmount,
+      slippage: data.slippage || "0.01",
+    },
+  };
 
-  // bangun MsgAddLiquidity
-  const msg = MsgAddLiquidity.fromPartial({
-    creator: account.address,               // address pengirim
-    prc20: data.tokenContract,              // address token PRC20
-    amountPaxi: data.paxiAmount,             // jumlah upaxi (string)
-    amountPrc20: toBaseUnit(data.tokenAmount) // convert ke base unit
-  });
+  const fee = "auto";
 
-  // bungkus msg ke protobuf Any
-  const anyMsg = Any.fromPartial({
-    typeUrl: "/paxi.swap.v1.MsgAddLiquidity", // type URL module
-    value: MsgAddLiquidity.encode(msg).finish()
-  });
-
-  // kirim tx ke blockchain
-  const result = await client.signAndBroadcast(
-    account.address, // signer
-    [anyMsg],        // daftar msg
-    "auto"           // gas
+  const res = await client.signAndBroadcast(
+    account.address,
+    [msg],
+    fee
   );
 
-  // cek apakah tx gagal
-  if (result.code !== 0) {
-    throw new Error(result.rawLog || "Add liquidity failed");
+  if (res.code !== 0) {
+    throw new Error(res.rawLog);
   }
 
-  // return hasil tx
   return {
-    txHash: result.transactionHash,
-    height: result.height
+    txHash: res.transactionHash,
+    height: res.height,
   };
 }
 
