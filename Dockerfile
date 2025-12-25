@@ -1,7 +1,7 @@
 # =========================
-# STAGE 1: build paxid (STATIC wasmvm)
+# STAGE 1: build paxid (BENAR-BENAR STATIC)
 # =========================
-FROM golang:1.24-bookworm AS paxid-builder
+FROM golang:1.22-bookworm AS paxid-builder
 
 WORKDIR /build
 
@@ -16,16 +16,21 @@ RUN apt-get update && apt-get install -y \
 RUN git clone https://github.com/paxi-web3/paxi.git
 WORKDIR /build/paxi
 
-# ⚠️ build paxid dengan STATIC wasmvm (INI KUNCI)
-ENV LEDGER_ENABLED=false
-ENV BUILD_TAGS=netgo,static
+# ⛔ JANGAN pakai make build (itu build DYNAMIC)
+# ✅ build paxid STATIC manual
 ENV CGO_ENABLED=0
+ENV GOOS=linux
+ENV GOARCH=amd64
 
-RUN make build
+RUN go build \
+    -tags "netgo static" \
+    -ldflags "-s -w -extldflags '-static'" \
+    -o /build/paxid \
+    ./cmd/paxid
 
 
 # =========================
-# STAGE 2: runtime (TANPA wasmvm)
+# STAGE 2: runtime
 # =========================
 FROM node:18-bookworm-slim
 
@@ -35,8 +40,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=paxid-builder /build/paxi/build/paxid /usr/local/bin/paxid
-
+COPY --from=paxid-builder /build/paxid /usr/local/bin/paxid
 RUN chmod +x /usr/local/bin/paxid
 
 COPY package*.json ./
