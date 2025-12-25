@@ -403,23 +403,15 @@ async function executeBurnToken(mnemonic, data) {
 // ===== FIX: ADD LIQUIDITY =====
 // ===== SOLUSI PALING AMAN & TERBUKTI: ADD LP VIA PAXID CLI =====
 // (INI YANG DIJAMIN BERHASIL, TANPA ERROR REGISTRY / TYPE URL)
+// ===== EXEC ADD LP (PAKAI PATH ABSOLUT, BUKAN paxid) =====
 async function executeAddLiquidity(mnemonic, data) {
-  /*
-    data = {
-      tokenContract: "paxi1.....", // PRC20
-      paxiAmount: "1000000",       // upaxi (INTEGER)
-      tokenAmount: "500000000",    // base unit PRC20
-    }
-  */
-  
-  // simpan mnemonic sementara ke file aman
   const tmpDir = await fs.mkdtemp(`${os.tmpdir()}/paxi-`);
   const mnemonicFile = `${tmpDir}/mnemonic.txt`;
   await fs.writeFile(mnemonicFile, mnemonic, { mode: 0o600 });
-  
+
   try {
     const cmd = `
-      paxid tx swap provide-liquidity \
+      /usr/local/bin/paxid tx swap provide-liquidity \
         ${data.tokenContract} \
         ${data.paxiAmount} \
         ${data.tokenAmount} \
@@ -429,27 +421,20 @@ async function executeAddLiquidity(mnemonic, data) {
         --fees 500000upaxi \
         -y --output json
     `;
-    
-    const { stdout, stderr } = await execPromise(cmd);
-    
-    if (stderr) {
-      throw new Error(stderr);
-    }
-    
+
+    const { stdout, stderr } = await execPromise(cmd, {
+      shell: "/bin/bash"
+    });
+
+    if (stderr) throw new Error(stderr);
+
     const res = JSON.parse(stdout);
-    
     if (res.code && res.code !== 0) {
       throw new Error(res.raw_log || "Add LP failed");
     }
-    
-    return {
-      txHash: res.txhash,
-      height: res.height,
-      method: "paxid-cli"
-    };
-    
+
+    return { txHash: res.txhash, height: res.height };
   } finally {
-    // hapus mnemonic dari disk
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 }
