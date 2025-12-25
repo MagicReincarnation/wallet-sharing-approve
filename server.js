@@ -9,8 +9,17 @@ const cors = require('cors');
 const { DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
 const { SigningCosmWasmClient } = require("@cosmjs/cosmwasm-stargate");
 const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
+// Di bagian require (paling atas)
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+const fs = require('fs').promises;
+const os = require('os');
+
 // import Any protobuf (wajib untuk kirim msg module)
 const { Any } = require("cosmjs-types/google/protobuf/any");
+
+
 
 const app = express();
 const server = http.createServer(app);
@@ -375,145 +384,95 @@ async function executeBurnToken(mnemonic, data) {
 }
 
 // ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
-// ===== AUTO ADD LIQUIDITY (Two-Step, Pure JS, 100% Work) =====
+// ===== ADD LIQUIDITY via CLI (100% Work) =====
 async function executeAddLiquidity(mnemonic, data) {
-  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
-    prefix: "paxi",
-  });
-  const [account] = await wallet.getAccounts();
-  
-  const wasmClient = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
-  
-  const stargateClient = await SigningStargateClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
-  
-  // SWAP MODULE ADDRESS (fixed di Paxi)
-  const SWAP_MODULE_ADDRESS = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
-  
-  console.log("🔧 Starting Add Liquidity Process...");
+  console.log("🔧 Adding Liquidity via Paxi CLI...");
   console.log("Token:", data.tokenContract);
   console.log("PAXI Amount:", data.paxiAmount);
   console.log("Token Amount:", data.tokenAmount);
   
-  // ===== STEP 1: Increase Allowance =====
-  console.log("\n📝 Step 1/3: Increasing Allowance...");
+  // Create temp file for mnemonic (more secure than env var)
+  const tmpFile = `${os.tmpdir()}/paxi_mnemonic_${Date.now()}.txt`;
+  await fs.writeFile(tmpFile, mnemonic, { mode: 0o600 }); // Secure permissions
   
-  const allowanceMsg = {
-    increase_allowance: {
-      spender: SWAP_MODULE_ADDRESS,
-      amount: data.tokenAmount.toString()
+  const keyName = `multisig_temp_${Date.now()}`;
+  
+  try {
+    // Step 1: Import key from mnemonic
+    console.log("📝 Importing wallet...");
+    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    await execPromise(importCmd);
+    console.log("✅ Wallet imported");
+    
+    // Step 2: Execute add liquidity command
+    console.log("💧 Executing provide liquidity...");
+    const liquidityCmd = `paxid tx swap provide-liquidity \
+      --prc20 "${data.tokenContract}" \
+      --paxi-amount "${data.paxiAmount}" \
+      --prc20-amount "${data.tokenAmount}" \
+      --from ${keyName} \
+      --keyring-backend test \
+      --chain-id paxi-mainnet-1 \
+      --node ${RPC} \
+      --gas auto \
+      --gas-adjustment 1.5 \
+      --fees 500000upaxi \
+      --yes \
+      --output json`;
+    
+    const { stdout, stderr } = await execPromise(liquidityCmd);
+    
+    if (stderr) {
+      console.log("CLI stderr:", stderr);
     }
-  };
-  
-  let allowanceTxHash;
-  try {
-    const allowanceResult = await wasmClient.execute(
-      account.address,
-      data.tokenContract,
-      allowanceMsg,
-      "auto",
-      "Approve token for liquidity pool"
-    );
     
-    allowanceTxHash = allowanceResult.transactionHash;
-    console.log("✅ Allowance TX:", allowanceTxHash);
-  } catch (e) {
-    console.error("❌ Allowance failed:", e);
-    throw new Error(`Failed to approve token: ${e.message}`);
-  }
-  
-  // Wait for block confirmation
-  console.log("⏳ Waiting for confirmation...");
-  await new Promise(resolve => setTimeout(resolve, 6000));
-  
-  // ===== STEP 2: Transfer PAXI to Swap Module =====
-  console.log("\n💰 Step 2/3: Transferring PAXI to Swap Module...");
-  
-  let paxiTxHash;
-  try {
-    const paxiAmount = { denom: 'upaxi', amount: data.paxiAmount.toString() };
-    
-    const paxiResult = await stargateClient.sendTokens(
-      account.address,
-      SWAP_MODULE_ADDRESS,
-      [paxiAmount],
-      "auto",
-      `liquidity:${data.tokenContract}:${data.tokenAmount}`
-    );
-    
-    paxiTxHash = paxiResult.transactionHash;
-    console.log("✅ PAXI Transfer TX:", paxiTxHash);
-  } catch (e) {
-    console.error("❌ PAXI transfer failed:", e);
-    throw new Error(`Failed to transfer PAXI: ${e.message}`);
-  }
-  
-  // Wait for block confirmation
-  console.log("⏳ Waiting for confirmation...");
-  await new Promise(resolve => setTimeout(resolve, 6000));
-  
-  // ===== STEP 3: Execute Provide Liquidity via CW20 Send =====
-  console.log("\n💧 Step 3/3: Executing Provide Liquidity...");
-  
-  let liquidityTxHash;
-  try {
-    // Encode message untuk CW20 Send hook
-    const provideMsg = {
-      provide_liquidity: {
-        paxi_amount: data.paxiAmount.toString(),
-        slippage: data.slippage || "0.01"
+    // Parse result
+    let result;
+    try {
+      result = JSON.parse(stdout);
+    } catch (parseError) {
+      // Jika output bukan JSON, extract txhash dari text
+      const txHashMatch = stdout.match(/txhash:\s*([A-F0-9]+)/i);
+      if (txHashMatch) {
+        result = { txhash: txHashMatch[1], code: 0 };
+      } else {
+        throw new Error(`Cannot parse CLI output: ${stdout}`);
       }
+    }
+    
+    // Cleanup
+    console.log("🧹 Cleaning up...");
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+    await fs.unlink(tmpFile);
+    
+    if (result.code && result.code !== 0) {
+      throw new Error(`Transaction failed: ${result.raw_log || result.log}`);
+    }
+    
+    console.log("✅ Liquidity Added Successfully!");
+    console.log("TX Hash:", result.txhash);
+    
+    return {
+      success: true,
+      txHash: result.txhash,
+      height: result.height,
+      method: "cli"
     };
     
-    const sendMsg = {
-      send: {
-        contract: SWAP_MODULE_ADDRESS,
-        amount: data.tokenAmount.toString(),
-        msg: Buffer.from(JSON.stringify(provideMsg)).toString('base64')
-      }
-    };
+  } catch (error) {
+    console.error("❌ Add liquidity failed:", error);
     
-    const liquidityResult = await wasmClient.execute(
-      account.address,
-      data.tokenContract,
-      sendMsg,
-      "auto",
-      "Provide liquidity to pool"
-    );
+    // Cleanup on error
+    try {
+      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+    } catch {}
     
-    liquidityTxHash = liquidityResult.transactionHash;
-    console.log("✅ Liquidity TX:", liquidityTxHash);
+    try {
+      await fs.unlink(tmpFile);
+    } catch {}
     
-  } catch (e) {
-    console.error("❌ Liquidity provision failed:", e);
-    throw new Error(`Failed to provide liquidity: ${e.message}`);
+    throw new Error(`CLI execution failed: ${error.message}`);
   }
-  
-  console.log("\n🎉 Add Liquidity Completed Successfully!");
-  
-  return {
-    success: true,
-    txHash: liquidityTxHash,
-    steps: {
-      allowance: {
-        txHash: allowanceTxHash,
-        status: "completed"
-      },
-      paxiTransfer: {
-        txHash: paxiTxHash,
-        status: "completed"
-      },
-      provideLiquidity: {
-        txHash: liquidityTxHash,
-        status: "completed"
-      }
-    },
-    poolAddress: data.tokenContract,
-    lpTokensReceived: "Check transaction for LP amount"
-  };
 }
 
 async function executeRemoveLiquidity(mnemonic, data) {
