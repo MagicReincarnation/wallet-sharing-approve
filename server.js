@@ -388,23 +388,21 @@ async function executeAddLiquidity(mnemonic, data) {
     { gasPrice: GasPrice.fromString("0.05upaxi") }
   );
 
-  const msg = {
-    typeUrl: "/paxi.swap.v1.MsgAddLiquidity", // ⬅️ TYPEURL, BUKAN IMPORT
-    value: {
+  const msg = Any.fromPartial({
+    typeUrl: "/paxi.swap.v1.MsgAddLiquidity",
+    value: Buffer.from(JSON.stringify({
       creator: account.address,
       tokenContract: data.tokenContract,
       paxiAmount: data.paxiAmount,
       tokenAmount: data.tokenAmount,
       slippage: data.slippage || "0.01",
-    },
-  };
-
-  const fee = "auto";
+    })),
+  });
 
   const res = await client.signAndBroadcast(
     account.address,
     [msg],
-    fee
+    "auto"
   );
 
   if (res.code !== 0) {
