@@ -9,6 +9,13 @@ const cors = require('cors');
 const { DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
 const { SigningCosmWasmClient } = require("@cosmjs/cosmwasm-stargate");
 const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
+// import Any protobuf (wajib untuk kirim msg module)
+const { Any } = require("cosmjs-types/google/protobuf/any");
+
+// import protobuf MsgAddLiquidity dari module swap Paxi
+// ⚠️ path ini HARUS sesuai dengan repo proto Paxi kamu
+const { MsgAddLiquidity } = require("paxi-types/x/swap/tx");
+
 
 const app = express();
 const server = http.createServer(app);
@@ -377,26 +384,65 @@ async function executeBurnToken(mnemonic, data) {
 
 // ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
 // ===== EXECUTE ADD LIQUIDITY (Paxi Swap Module) =====
+// ===== FUNCTION ADD LIQUIDITY =====
 async function executeAddLiquidity(mnemonic, data) {
-  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+
+  // buat wallet dari mnemonic
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(
+    mnemonic,
+    { prefix: "paxi" }
+  );
+
+  // ambil address pertama
   const [account] = await wallet.getAccounts();
-  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, { gasPrice: GasPrice.fromString("0.05upaxi") });
-  
-  const tokenAmount = toBaseUnit(data.tokenAmount);
-  const funds = [{ denom: "upaxi", amount: data.paxiAmount }];
-  
-  const msg = {
-    provide_liquidity: {
-      assets: [
-        { info: { token: { contract_addr: data.tokenContract } }, amount: tokenAmount },
-        { info: { native_token: { denom: "upaxi" } }, amount: data.paxiAmount }
-      ],
-      slippage_tolerance: data.slippage || "0.01"
-    }
+
+  // connect ke RPC menggunakan StargateClient (module)
+  const client = await SigningStargateClient.connectWithSigner(
+    RPC,
+    wallet,
+    { gasPrice: GasPrice.fromString("0.05upaxi") }
+  );
+
+  /**
+   * data dari proposal:
+   * {
+   *   tokenContract: "paxi1xxxx",
+   *   tokenAmount: "50000",   // human readable
+   *   paxiAmount:  "1000000"  // upaxi (base unit)
+   * }
+   */
+
+  // bangun MsgAddLiquidity
+  const msg = MsgAddLiquidity.fromPartial({
+    creator: account.address,               // address pengirim
+    prc20: data.tokenContract,              // address token PRC20
+    amountPaxi: data.paxiAmount,             // jumlah upaxi (string)
+    amountPrc20: toBaseUnit(data.tokenAmount) // convert ke base unit
+  });
+
+  // bungkus msg ke protobuf Any
+  const anyMsg = Any.fromPartial({
+    typeUrl: "/paxi.swap.v1.MsgAddLiquidity", // type URL module
+    value: MsgAddLiquidity.encode(msg).finish()
+  });
+
+  // kirim tx ke blockchain
+  const result = await client.signAndBroadcast(
+    account.address, // signer
+    [anyMsg],        // daftar msg
+    "auto"           // gas
+  );
+
+  // cek apakah tx gagal
+  if (result.code !== 0) {
+    throw new Error(result.rawLog || "Add liquidity failed");
+  }
+
+  // return hasil tx
+  return {
+    txHash: result.transactionHash,
+    height: result.height
   };
-  
-  const result = await client.execute(account.address, SWAP_MODULE_ADDRESS, msg, "auto", "", funds);
-  return { txHash: result.transactionHash };
 }
 
 async function executeRemoveLiquidity(mnemonic, data) {
