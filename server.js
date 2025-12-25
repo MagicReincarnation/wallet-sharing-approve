@@ -103,6 +103,9 @@ const RPC = 'https://mainnet-rpc.paxinet.io';
 const LCD = 'https://mainnet-lcd.paxinet.io';
 const sessions = new Map();
 
+// ===== SWAP MODULE ADDRESS (untuk add liquidity) =====
+const SWAP_MODULE_ADDRESS = process.env.SWAP_MODULE_ADDRESS || "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
+
 // ===== HELPERS =====
 async function getState() {
   const res = await pool.query('SELECT * FROM wallet_state WHERE id = 1');
@@ -365,37 +368,26 @@ async function executeBurnToken(mnemonic, data) {
 }
 
 // ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
+// ===== EXECUTE ADD LIQUIDITY (Paxi Swap Module) =====
 async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
-  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
-  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, { gasPrice: GasPrice.fromString("0.05upaxi") });
+
   const tokenAmount = toBaseUnit(data.tokenAmount);
-  
-  const msgAllowance = {
-    increase_allowance: {
-      spender: data.pairAddress,
-      amount: tokenAmount,
-      expires: { never: {} }
-    }
-  };
-  await client.execute(account.address, data.tokenContract, msgAllowance, "auto");
-  
-  const msgAddLp = {
+  const funds = [{ denom: "upaxi", amount: data.paxiAmount }];
+
+  const msg = {
     provide_liquidity: {
       assets: [
         { info: { token: { contract_addr: data.tokenContract } }, amount: tokenAmount },
         { info: { native_token: { denom: "upaxi" } }, amount: data.paxiAmount }
       ],
-      slippage_tolerance: data.slippage ?? "0.01"
+      slippage_tolerance: data.slippage || "0.01"
     }
   };
-  
-  const funds = [{ denom: "upaxi", amount: data.paxiAmount }];
-  const result = await client.execute(account.address, data.pairAddress, msgAddLp, "auto", "", funds);
-  
+
+  const result = await client.execute(account.address, SWAP_MODULE_ADDRESS, msg, "auto", "", funds);
   return { txHash: result.transactionHash };
 }
 
