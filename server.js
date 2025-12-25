@@ -376,7 +376,7 @@ async function executeBurnToken(mnemonic, data) {
 
 // ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
 // ===== EXECUTE ADD LIQUIDITY (Paxi Swap Module) =====
-async function executeAddLiquidityModule(mnemonic, data) {
+async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
     prefix: "paxi",
   });
