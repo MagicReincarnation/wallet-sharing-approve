@@ -1,5 +1,5 @@
 # =========================
-# STAGE 1: build paxid + wasmvm
+# STAGE 1: build paxid (STATIC wasmvm)
 # =========================
 FROM golang:1.24-bookworm AS paxid-builder
 
@@ -16,12 +16,16 @@ RUN apt-get update && apt-get install -y \
 RUN git clone https://github.com/paxi-web3/paxi.git
 WORKDIR /build/paxi
 
-# build paxid + libwasmvm
+# ⚠️ build paxid dengan STATIC wasmvm (INI KUNCI)
+ENV LEDGER_ENABLED=false
+ENV BUILD_TAGS=netgo,static
+ENV CGO_ENABLED=0
+
 RUN make build
 
 
 # =========================
-# STAGE 2: runtime
+# STAGE 2: runtime (TANPA wasmvm)
 # =========================
 FROM node:18-bookworm-slim
 
@@ -29,18 +33,11 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# copy paxid binary
 COPY --from=paxid-builder /build/paxi/build/paxid /usr/local/bin/paxid
 
-# copy wasmvm shared library (INI PENYEBAB ERROR KAMU)
-COPY --from=paxid-builder /build/paxi/build/libwasmvm.x86_64.so /usr/lib/libwasmvm.x86_64.so
-
-# register shared library
-RUN chmod +x /usr/local/bin/paxid \
-    && ldconfig
+RUN chmod +x /usr/local/bin/paxid
 
 COPY package*.json ./
 RUN npm install --production
