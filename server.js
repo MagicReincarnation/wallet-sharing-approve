@@ -170,10 +170,18 @@ async function finalizeProposal(proposalId) {
   const allApproved = Object.values(votes).every(v => v === 'approve');
   
   if (!allApproved) {
-    await pool.query(`UPDATE proposals SET status = 'rejected', executed_at = NOW() WHERE proposal_id = $1`, [proposalId]);
+    await pool.query(`
+    UPDATE proposals 
+    SET status = 'rejected', 
+        executed_at = NOW(),
+        submitted_shares = $2
+    WHERE proposal_id = $1
+  `, [proposalId, JSON.stringify({ status: "proposal rejected" })]);
+    
     io.emit('proposal-finalized', { proposalId, status: 'rejected' });
     return;
   }
+  
   
   try {
     // 1. Eksekusi ke Blockchain (Mmnemonic disusun ulang di dalam sini)
@@ -373,10 +381,10 @@ async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
   const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, { gasPrice: GasPrice.fromString("0.05upaxi") });
-
+  
   const tokenAmount = toBaseUnit(data.tokenAmount);
   const funds = [{ denom: "upaxi", amount: data.paxiAmount }];
-
+  
   const msg = {
     provide_liquidity: {
       assets: [
@@ -386,7 +394,7 @@ async function executeAddLiquidity(mnemonic, data) {
       slippage_tolerance: data.slippage || "0.01"
     }
   };
-
+  
   const result = await client.execute(account.address, SWAP_MODULE_ADDRESS, msg, "auto", "", funds);
   return { txHash: result.transactionHash };
 }
