@@ -108,6 +108,28 @@ async function initDB() {
 
 initDB();
 
+// Add at top of server.js after requires
+async function checkPaxiCLI() {
+  try {
+    const { stdout } = await execPromise('which paxid');
+    const paxidPath = stdout.trim();
+    console.log('✅ Paxi CLI Found:', paxidPath);
+    
+    const { stdout: version } = await execPromise('paxid version');
+    console.log('📦 Version:', version.trim());
+    
+    return true;
+  } catch (e) {
+    console.error('❌ Paxi CLI Not Found!');
+    console.error('Please install: npm run install-cli');
+    console.error('Or manually: wget https://github.com/paxi-web3/paxi/releases/latest/download/paxid-linux-amd64 && chmod +x paxid-linux-amd64 && sudo mv paxid-linux-amd64 /usr/local/bin/paxid');
+    return false;
+  }
+}
+
+// Call at startup (add after initDB())
+checkPaxiCLI();
+
 // ===== CONFIG =====
 const AUTHORIZED_DEVS = (process.env.DEV_ADDRESSES || '').split(',').map(a => a.trim()).filter(Boolean);
 const RPC = 'https://mainnet-rpc.paxinet.io';
@@ -386,27 +408,51 @@ async function executeBurnToken(mnemonic, data) {
 // ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
 // ===== ADD LIQUIDITY via CLI (100% Work) =====
 async function executeAddLiquidity(mnemonic, data) {
+  // Try CLI first
+  try {
+    await execPromise('paxid version', { timeout: 3000 });
+    return await executeAddLiquidityViaCLI(mnemonic, data);
+  } catch (cliError) {
+    console.warn('⚠️  CLI not available, falling back to JavaScript method');
+    return await executeAddLiquidityViaJS(mnemonic, data);
+  }
+}
+
+async function executeAddLiquidityViaCLI(mnemonic, data) {
   console.log("🔧 Adding Liquidity via Paxi CLI...");
+  
+  // STEP 0: Check CLI availability
+  try {
+    await execPromise('paxid version', { timeout: 5000 });
+  } catch (e) {
+    throw new Error('Paxi CLI not installed. Please run: npm run install-cli or install manually');
+  }
+  
   console.log("Token:", data.tokenContract);
   console.log("PAXI Amount:", data.paxiAmount);
   console.log("Token Amount:", data.tokenAmount);
   
-  // Create temp file for mnemonic (more secure than env var)
   const tmpFile = `${os.tmpdir()}/paxi_mnemonic_${Date.now()}.txt`;
-  await fs.writeFile(tmpFile, mnemonic, { mode: 0o600 }); // Secure permissions
+  await fs.writeFile(tmpFile, mnemonic, { mode: 0o600 });
   
   const keyName = `multisig_temp_${Date.now()}`;
   
   try {
-    // Step 1: Import key from mnemonic
+    // Step 1: Import key dengan full path
     console.log("📝 Importing wallet...");
-    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
-    await execPromise(importCmd);
-    console.log("✅ Wallet imported");
     
-    // Step 2: Execute add liquidity command
+    // Use absolute path to paxid if needed
+    const paxidPath = (await execPromise('which paxid')).stdout.trim() || '/usr/local/bin/paxid';
+    
+    const importCmd = `echo "${mnemonic}" | ${paxidPath} keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    const importResult = await execPromise(importCmd, { timeout: 10000 });
+    
+    console.log("✅ Wallet imported:", importResult.stdout);
+    
+    // Step 2: Execute add liquidity
     console.log("💧 Executing provide liquidity...");
-    const liquidityCmd = `paxid tx swap provide-liquidity \
+    
+    const liquidityCmd = `${paxidPath} tx swap provide-liquidity \
       --prc20 "${data.tokenContract}" \
       --paxi-amount "${data.paxiAmount}" \
       --prc20-amount "${data.tokenAmount}" \
@@ -420,18 +466,16 @@ async function executeAddLiquidity(mnemonic, data) {
       --yes \
       --output json`;
     
-    const { stdout, stderr } = await execPromise(liquidityCmd);
+    const { stdout, stderr } = await execPromise(liquidityCmd, { timeout: 30000 });
     
-    if (stderr) {
-      console.log("CLI stderr:", stderr);
-    }
+    console.log("📤 CLI Output:", stdout);
+    if (stderr) console.log("⚠️  CLI Stderr:", stderr);
     
     // Parse result
     let result;
     try {
       result = JSON.parse(stdout);
     } catch (parseError) {
-      // Jika output bukan JSON, extract txhash dari text
       const txHashMatch = stdout.match(/txhash:\s*([A-F0-9]+)/i);
       if (txHashMatch) {
         result = { txhash: txHashMatch[1], code: 0 };
@@ -442,7 +486,7 @@ async function executeAddLiquidity(mnemonic, data) {
     
     // Cleanup
     console.log("🧹 Cleaning up...");
-    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+    await execPromise(`${paxidPath} keys delete ${keyName} --keyring-backend test --yes 2>&1`);
     await fs.unlink(tmpFile);
     
     if (result.code && result.code !== 0) {
@@ -461,18 +505,91 @@ async function executeAddLiquidity(mnemonic, data) {
     
   } catch (error) {
     console.error("❌ Add liquidity failed:", error);
+    console.error("Error details:", error.stderr || error.message);
     
     // Cleanup on error
     try {
-      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+      const paxidPath = (await execPromise('which paxid')).stdout.trim() || '/usr/local/bin/paxid';
+      await execPromise(`${paxidPath} keys delete ${keyName} --keyring-backend test --yes 2>&1`);
     } catch {}
     
     try {
       await fs.unlink(tmpFile);
     } catch {}
     
-    throw new Error(`CLI execution failed: ${error.message}`);
+    throw new Error(`CLI execution failed: ${error.message}\nStderr: ${error.stderr || 'none'}`);
   }
+}
+
+async function executeAddLiquidityViaJS(mnemonic, data) {
+  console.log("🔧 Adding Liquidity via JavaScript (2-Step)...");
+  
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
+    prefix: "paxi",
+  });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  const SWAP_MODULE = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
+  
+  // STEP 1: Approve
+  console.log("📝 Step 1: Approving token...");
+  
+  const approveMsg = {
+    increase_allowance: {
+      spender: SWAP_MODULE,
+      amount: data.tokenAmount.toString()
+    }
+  };
+  
+  const approveResult = await client.execute(
+    account.address,
+    data.tokenContract,
+    approveMsg,
+    "auto",
+    "Approve for liquidity"
+  );
+  
+  console.log("✅ Approved:", approveResult.transactionHash);
+  await new Promise(resolve => setTimeout(resolve, 6000));
+  
+  // STEP 2: Send token with PAXI attached
+  console.log("💧 Step 2: Providing liquidity...");
+  
+  const sendMsg = {
+    send: {
+      contract: SWAP_MODULE,
+      amount: data.tokenAmount.toString(),
+      msg: Buffer.from(JSON.stringify({
+        provide_liquidity: {}
+      })).toString('base64')
+    }
+  };
+  
+  const funds = [
+    { denom: 'upaxi', amount: data.paxiAmount.toString() }
+  ];
+  
+  const result = await client.execute(
+    account.address,
+    data.tokenContract,
+    sendMsg,
+    "auto",
+    "Provide liquidity",
+    funds
+  );
+  
+  console.log("✅ Liquidity Added:", result.transactionHash);
+  
+  return {
+    success: true,
+    txHash: result.transactionHash,
+    approveTxHash: approveResult.transactionHash,
+    method: "javascript"
+  };
 }
 
 async function executeRemoveLiquidity(mnemonic, data) {
