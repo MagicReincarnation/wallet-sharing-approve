@@ -23,6 +23,20 @@ const io = socketIO(server, {
 app.use(cors());
 app.use(express.json());
 
+// ===== DECIMAL HELPERS (WAJIB TAMBAH) =====
+const CW20_DECIMALS = 6n;
+
+function toBaseUnit(amount, decimals = CW20_DECIMALS) {
+  if (amount === undefined || amount === null) {
+    throw new Error("Amount is required");
+  }
+  
+  const [whole, fraction = ""] = amount.toString().split(".");
+  const paddedFraction = fraction.padEnd(Number(decimals), "0").slice(0, Number(decimals));
+  
+  return BigInt(whole + paddedFraction).toString();
+}
+
 // ===== DATABASE =====
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -279,7 +293,7 @@ async function executeSendToken(mnemonic, data) {
   const msg = {
     transfer: {
       recipient: data.recipient,
-      amount: (parseFloat(data.amount) * 1_000_000).toString()
+      amount: toBaseUnit(data.amount)
     }
   };
   
@@ -330,7 +344,7 @@ async function executeMintToken(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  const msg = { mint: { recipient: data.recipient, amount: data.amount } };
+  const msg = { mint: { recipient: data.recipient, amount: toBaseUnit(data.amount) } };
   const result = await client.execute(account.address, data.contractAddress, msg, "auto");
   
   return { txHash: result.transactionHash };
@@ -344,12 +358,13 @@ async function executeBurnToken(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  const msg = { burn: { amount: data.amount } };
+  const msg = { burn: { amount: toBaseUnit(data.amount) } };
   const result = await client.execute(account.address, data.contractAddress, msg, "auto");
   
   return { txHash: result.transactionHash };
 }
 
+// ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
 async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
@@ -357,28 +372,27 @@ async function executeAddLiquidity(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  // 1. Berikan Izin (Allowance) ke Kontrak DEX untuk token CW20
+  const tokenAmount = toBaseUnit(data.tokenAmount);
+  
   const msgAllowance = {
     increase_allowance: {
       spender: data.pairAddress,
-      amount: data.tokenAmount,
+      amount: tokenAmount,
       expires: { never: {} }
     }
   };
   await client.execute(account.address, data.tokenContract, msgAllowance, "auto");
   
-  // 2. Kirim Likuiditas (Contoh standar DEX: token + native coin)
   const msgAddLp = {
     provide_liquidity: {
       assets: [
-        { info: { token: { contract_addr: data.tokenContract } }, amount: data.tokenAmount },
+        { info: { token: { contract_addr: data.tokenContract } }, amount: tokenAmount },
         { info: { native_token: { denom: "upaxi" } }, amount: data.paxiAmount }
       ],
       slippage_tolerance: data.slippage ?? "0.01"
     }
   };
   
-  // Jika menyertakan koin native (PAXI), kirim di funds
   const funds = [{ denom: "upaxi", amount: data.paxiAmount }];
   const result = await client.execute(account.address, data.pairAddress, msgAddLp, "auto", "", funds);
   
