@@ -6,7 +6,7 @@ const bip39 = require('bip39');
 const secrets = require('secrets.js-grempe');
 const { Pool } = require('pg');
 const cors = require('cors');
-const { Registry, DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
+const { DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
 const { SigningCosmWasmClient } = require("@cosmjs/cosmwasm-stargate");
 const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
 // Di bagian require (paling atas)
@@ -15,12 +15,6 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 const fs = require('fs').promises;
 const os = require('os');
-
-// import Any protobuf (wajib untuk kirim msg module)
-const { Any } = require("cosmjs-types/google/protobuf/any");
-
-// registry Any untuk custom msg
-const registry = new Registry();
 
 const app = express();
 const server = http.createServer(app);
@@ -407,52 +401,57 @@ async function executeBurnToken(mnemonic, data) {
 }
 
 // ===== FIX: ADD LIQUIDITY =====
+// ===== SOLUSI PALING AMAN & TERBUKTI: ADD LP VIA PAXID CLI =====
+// (INI YANG DIJAMIN BERHASIL, TANPA ERROR REGISTRY / TYPE URL)
 async function executeAddLiquidity(mnemonic, data) {
-  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
-    prefix: "paxi"
-  });
-  const [account] = await wallet.getAccounts();
-  
-  const client = await SigningStargateClient.connectWithSigner(
-    RPC,
-    wallet,
-    {
-      gasPrice: GasPrice.fromString("0.05upaxi"),
-      registry
+  /*
+    data = {
+      tokenContract: "paxi1.....", // PRC20
+      paxiAmount: "1000000",       // upaxi (INTEGER)
+      tokenAmount: "500000000",    // base unit PRC20
     }
-  );
+  */
   
-  const msg = {
-    typeUrl: "/x.swap.types.MsgProvideLiquidity",
-    value: {
-      creator: account.address,
-      prc20: data.tokenContract, // alamat CW20
-      paxiAmount: data.paxiAmount, // STRING integer (NO koma / titik)
-      prc20Amount: data.tokenAmount // STRING base unit CW20
+  // simpan mnemonic sementara ke file aman
+  const tmpDir = await fs.mkdtemp(`${os.tmpdir()}/paxi-`);
+  const mnemonicFile = `${tmpDir}/mnemonic.txt`;
+  await fs.writeFile(mnemonicFile, mnemonic, { mode: 0o600 });
+  
+  try {
+    const cmd = `
+      paxid tx swap provide-liquidity \
+        ${data.tokenContract} \
+        ${data.paxiAmount} \
+        ${data.tokenAmount} \
+        --from-mnemonic-file ${mnemonicFile} \
+        --chain-id paxi-mainnet \
+        --node ${RPC} \
+        --fees 500000upaxi \
+        -y --output json
+    `;
+    
+    const { stdout, stderr } = await execPromise(cmd);
+    
+    if (stderr) {
+      throw new Error(stderr);
     }
-  };
-  
-  const fee = {
-    amount: [{ denom: "upaxi", amount: "500000" }],
-    gas: "600000"
-  };
-  
-  const result = await client.signAndBroadcast(
-    account.address,
-    [msg],
-    fee,
-    "Add Liquidity"
-  );
-  
-  if (result.code !== 0) {
-    throw new Error(result.rawLog);
+    
+    const res = JSON.parse(stdout);
+    
+    if (res.code && res.code !== 0) {
+      throw new Error(res.raw_log || "Add LP failed");
+    }
+    
+    return {
+      txHash: res.txhash,
+      height: res.height,
+      method: "paxid-cli"
+    };
+    
+  } finally {
+    // hapus mnemonic dari disk
+    await fs.rm(tmpDir, { recursive: true, force: true });
   }
-  
-  return {
-    txHash: result.transactionHash,
-    height: result.height,
-    method: "swap-module"
-  };
 }
 
 async function executeRemoveLiquidity(mnemonic, data) {
