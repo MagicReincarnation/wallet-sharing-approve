@@ -537,55 +537,134 @@ async function executeAddLiquidityViaJS(mnemonic, data) {
   console.log("Token:", data.tokenContract);
   console.log("PAXI:", data.paxiAmount, "Token:", data.tokenAmount);
   
-  // Query pool info
-  console.log("\n🔍 Querying pool...");
-  const poolRes = await fetch(`${LCD}/paxi/swap/pool/${data.tokenContract}`);
-  const poolData = await poolRes.json();
+  // Check if pool exists
+  console.log("\n🔍 Checking pool...");
+  let poolExists = false;
   
-  if (!poolData.pool) {
-    throw new Error(`Pool not found for token: ${data.tokenContract}. Please create pool first.`);
+  try {
+    const poolRes = await fetch(`${LCD}/paxi/swap/pool/${data.tokenContract}`);
+    const poolData = await poolRes.json();
+    
+    if (poolData.pool && poolData.pool.paxi_reserve && poolData.pool.prc20_reserve) {
+      poolExists = true;
+      console.log("✅ Pool exists");
+      console.log("PAXI Reserve:", poolData.pool.paxi_reserve);
+      console.log("Token Reserve:", poolData.pool.prc20_reserve);
+    }
+  } catch (e) {
+    console.log("ℹ️  Pool not found, will create new pool");
   }
   
-  console.log("✅ Pool found");
-  console.log("PAXI Reserve:", poolData.pool.paxi_reserve);
-  console.log("Token Reserve:", poolData.pool.prc20_reserve);
+  // METHOD: Direct execution with funds
+  // Paxi Swap akan auto-create pool jika belum ada
   
-  // IMPORTANT: For Paxi, we need to send BOTH tokens together
-  // Step 1: Approve is already done in previous attempt
+  console.log("\n📝 Step 1: Approving token...");
   
-  // Step 2: Use correct method - send token with PAXI attached
-  console.log("\n💧 Providing liquidity...");
+  // Get token info for decimals
+  const tokenInfo = await client.queryContractSmart(data.tokenContract, {
+    token_info: {}
+  });
   
-  const provideLiquidityMsg = {
-    provide_liquidity: {
-      paxi_amount: data.paxiAmount.toString(),
-      token_amount: data.tokenAmount.toString(),
-      slippage_tolerance: "0.01" // 1%
+  console.log("Token:", tokenInfo.symbol, "Decimals:", tokenInfo.decimals);
+  
+  // Approve token
+  const approveMsg = {
+    increase_allowance: {
+      spender: data.tokenContract, // Approve to self for hook
+      amount: data.tokenAmount.toString(),
+      expires: { never: {} }
     }
   };
   
-  // Execute on token contract directly
+  const approveResult = await client.execute(
+    account.address,
+    data.tokenContract,
+    approveMsg,
+    "auto",
+    "Approve token"
+  );
+  
+  console.log("✅ Approved:", approveResult.transactionHash);
+  await new Promise(resolve => setTimeout(resolve, 6000));
+  
+  // Step 2: Provide liquidity (akan auto-create pool jika belum ada)
+  console.log("\n💧 Step 2: Providing liquidity...");
+  
+  // Method 1: Try via CW20 send hook
+  const hookMsg = {
+    provide_liquidity: {
+      paxi_amount: data.paxiAmount.toString(),
+      min_liquidity: "1" // Minimum LP tokens to receive
+    }
+  };
+  
+  const sendMsg = {
+    send: {
+      contract: data.tokenContract,
+      amount: data.tokenAmount.toString(),
+      msg: Buffer.from(JSON.stringify(hookMsg)).toString('base64')
+    }
+  };
+  
+  // Attach PAXI
   const funds = [
     { denom: 'upaxi', amount: data.paxiAmount.toString() }
   ];
   
-  const result = await client.execute(
-    account.address,
-    data.tokenContract,
-    provideLiquidityMsg,
-    "auto",
-    "Add liquidity",
-    funds
-  );
-  
-  console.log("✅ Success! TX:", result.transactionHash);
-  
-  return {
-    success: true,
-    txHash: result.transactionHash,
-    method: "javascript",
-    height: result.height
-  };
+  try {
+    const result = await client.execute(
+      account.address,
+      data.tokenContract,
+      sendMsg,
+      "auto",
+      poolExists ? "Add liquidity to existing pool" : "Create pool and add liquidity",
+      funds
+    );
+    
+    console.log("✅ Success! TX:", result.transactionHash);
+    
+    return {
+      success: true,
+      txHash: result.transactionHash,
+      approveTxHash: approveResult.transactionHash,
+      method: "javascript",
+      poolCreated: !poolExists,
+      height: result.height
+    };
+    
+  } catch (e) {
+    console.error("❌ Execution failed:", e);
+    
+    // Fallback: Try direct execute on token contract
+    console.log("\n🔄 Trying alternative method...");
+    
+    try {
+      const directMsg = {
+        provide_liquidity: {}
+      };
+      
+      const result2 = await client.execute(
+        account.address,
+        data.tokenContract,
+        directMsg,
+        "auto",
+        "Add liquidity",
+        funds
+      );
+      
+      console.log("✅ Success with alternative method! TX:", result2.transactionHash);
+      
+      return {
+        success: true,
+        txHash: result2.transactionHash,
+        approveTxHash: approveResult.transactionHash,
+        method: "javascript-alternative"
+      };
+      
+    } catch (e2) {
+      throw new Error(`Both methods failed. Error: ${e.message} | ${e2.message}`);
+    }
+  }
 }
 
 async function executeRemoveLiquidity(mnemonic, data) {
