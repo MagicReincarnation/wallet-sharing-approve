@@ -6,7 +6,7 @@ const bip39 = require('bip39');
 const secrets = require('secrets.js-grempe');
 const { Pool } = require('pg');
 const cors = require('cors');
-const { DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
+const { Registry, DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
 const { SigningCosmWasmClient } = require("@cosmjs/cosmwasm-stargate");
 const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
 // Di bagian require (paling atas)
@@ -19,7 +19,8 @@ const os = require('os');
 // import Any protobuf (wajib untuk kirim msg module)
 const { Any } = require("cosmjs-types/google/protobuf/any");
 
-
+// registry Any untuk custom msg
+const registry = new Registry();
 
 const app = express();
 const server = http.createServer(app);
@@ -405,266 +406,53 @@ async function executeBurnToken(mnemonic, data) {
   return { txHash: result.transactionHash };
 }
 
-// ===== FIX: ADD LIQUIDITY (CW20 SIDE) =====
-// ===== ADD LIQUIDITY via CLI (100% Work) =====
+// ===== FIX: ADD LIQUIDITY =====
 async function executeAddLiquidity(mnemonic, data) {
-  // Try CLI first
-  try {
-    await execPromise('paxid version', { timeout: 3000 });
-    return await executeAddLiquidityViaCLI(mnemonic, data);
-  } catch (cliError) {
-    console.warn('⚠️  CLI not available, falling back to JavaScript method');
-    return await executeAddLiquidityViaJS(mnemonic, data);
-  }
-}
-
-async function executeAddLiquidityViaCLI(mnemonic, data) {
-  console.log("🔧 Adding Liquidity via Paxi CLI...");
-  
-  // STEP 0: Check CLI availability
-  try {
-    await execPromise('paxid version', { timeout: 5000 });
-  } catch (e) {
-    throw new Error('Paxi CLI not installed. Please run: npm run install-cli or install manually');
-  }
-  
-  console.log("Token:", data.tokenContract);
-  console.log("PAXI Amount:", data.paxiAmount);
-  console.log("Token Amount:", data.tokenAmount);
-  
-  const tmpFile = `${os.tmpdir()}/paxi_mnemonic_${Date.now()}.txt`;
-  await fs.writeFile(tmpFile, mnemonic, { mode: 0o600 });
-  
-  const keyName = `multisig_temp_${Date.now()}`;
-  
-  try {
-    // Step 1: Import key dengan full path
-    console.log("📝 Importing wallet...");
-    
-    // Use absolute path to paxid if needed
-    const paxidPath = (await execPromise('which paxid')).stdout.trim() || '/usr/local/bin/paxid';
-    
-    const importCmd = `echo "${mnemonic}" | ${paxidPath} keys add ${keyName} --recover --keyring-backend test 2>&1`;
-    const importResult = await execPromise(importCmd, { timeout: 10000 });
-    
-    console.log("✅ Wallet imported:", importResult.stdout);
-    
-    // Step 2: Execute add liquidity
-    console.log("💧 Executing provide liquidity...");
-    
-    const liquidityCmd = `${paxidPath} tx swap provide-liquidity \
-      --prc20 "${data.tokenContract}" \
-      --paxi-amount "${data.paxiAmount}" \
-      --prc20-amount "${data.tokenAmount}" \
-      --from ${keyName} \
-      --keyring-backend test \
-      --chain-id paxi-mainnet-1 \
-      --node ${RPC} \
-      --gas auto \
-      --gas-adjustment 1.5 \
-      --fees 500000upaxi \
-      --yes \
-      --output json`;
-    
-    const { stdout, stderr } = await execPromise(liquidityCmd, { timeout: 30000 });
-    
-    console.log("📤 CLI Output:", stdout);
-    if (stderr) console.log("⚠️  CLI Stderr:", stderr);
-    
-    // Parse result
-    let result;
-    try {
-      result = JSON.parse(stdout);
-    } catch (parseError) {
-      const txHashMatch = stdout.match(/txhash:\s*([A-F0-9]+)/i);
-      if (txHashMatch) {
-        result = { txhash: txHashMatch[1], code: 0 };
-      } else {
-        throw new Error(`Cannot parse CLI output: ${stdout}`);
-      }
-    }
-    
-    // Cleanup
-    console.log("🧹 Cleaning up...");
-    await execPromise(`${paxidPath} keys delete ${keyName} --keyring-backend test --yes 2>&1`);
-    await fs.unlink(tmpFile);
-    
-    if (result.code && result.code !== 0) {
-      throw new Error(`Transaction failed: ${result.raw_log || result.log}`);
-    }
-    
-    console.log("✅ Liquidity Added Successfully!");
-    console.log("TX Hash:", result.txhash);
-    
-    return {
-      success: true,
-      txHash: result.txhash,
-      height: result.height,
-      method: "cli"
-    };
-    
-  } catch (error) {
-    console.error("❌ Add liquidity failed:", error);
-    console.error("Error details:", error.stderr || error.message);
-    
-    // Cleanup on error
-    try {
-      const paxidPath = (await execPromise('which paxid')).stdout.trim() || '/usr/local/bin/paxid';
-      await execPromise(`${paxidPath} keys delete ${keyName} --keyring-backend test --yes 2>&1`);
-    } catch {}
-    
-    try {
-      await fs.unlink(tmpFile);
-    } catch {}
-    
-    throw new Error(`CLI execution failed: ${error.message}\nStderr: ${error.stderr || 'none'}`);
-  }
-}
-
-async function executeAddLiquidityViaJS(mnemonic, data) {
-  console.log("🔧 Adding Liquidity via JavaScript...");
-  
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
-    prefix: "paxi",
+    prefix: "paxi"
   });
   const [account] = await wallet.getAccounts();
   
-  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
-  
-  console.log("Wallet:", account.address);
-  console.log("Token:", data.tokenContract);
-  console.log("PAXI:", data.paxiAmount, "Token:", data.tokenAmount);
-  
-  // Check if pool exists
-  console.log("\n🔍 Checking pool...");
-  let poolExists = false;
-  
-  try {
-    const poolRes = await fetch(`${LCD}/paxi/swap/pool/${data.tokenContract}`);
-    const poolData = await poolRes.json();
-    
-    if (poolData.pool && poolData.pool.paxi_reserve && poolData.pool.prc20_reserve) {
-      poolExists = true;
-      console.log("✅ Pool exists");
-      console.log("PAXI Reserve:", poolData.pool.paxi_reserve);
-      console.log("Token Reserve:", poolData.pool.prc20_reserve);
+  const client = await SigningStargateClient.connectWithSigner(
+    RPC,
+    wallet,
+    {
+      gasPrice: GasPrice.fromString("0.05upaxi"),
+      registry
     }
-  } catch (e) {
-    console.log("ℹ️  Pool not found, will create new pool");
-  }
-  
-  // METHOD: Direct execution with funds
-  // Paxi Swap akan auto-create pool jika belum ada
-  
-  console.log("\n📝 Step 1: Approving token...");
-  
-  // Get token info for decimals
-  const tokenInfo = await client.queryContractSmart(data.tokenContract, {
-    token_info: {}
-  });
-  
-  console.log("Token:", tokenInfo.symbol, "Decimals:", tokenInfo.decimals);
-  
-  // Approve token
-  const approveMsg = {
-    increase_allowance: {
-      spender: data.tokenContract, // Approve to self for hook
-      amount: data.tokenAmount.toString(),
-      expires: { never: {} }
-    }
-  };
-  
-  const approveResult = await client.execute(
-    account.address,
-    data.tokenContract,
-    approveMsg,
-    "auto",
-    "Approve token"
   );
   
-  console.log("✅ Approved:", approveResult.transactionHash);
-  await new Promise(resolve => setTimeout(resolve, 6000));
-  
-  // Step 2: Provide liquidity (akan auto-create pool jika belum ada)
-  console.log("\n💧 Step 2: Providing liquidity...");
-  
-  // Method 1: Try via CW20 send hook
-  const hookMsg = {
-    provide_liquidity: {
-      paxi_amount: data.paxiAmount.toString(),
-      min_liquidity: "1" // Minimum LP tokens to receive
+  const msg = {
+    typeUrl: "/x.swap.types.MsgProvideLiquidity",
+    value: {
+      creator: account.address,
+      prc20: data.tokenContract, // alamat CW20
+      paxiAmount: data.paxiAmount, // STRING integer (NO koma / titik)
+      prc20Amount: data.tokenAmount // STRING base unit CW20
     }
   };
   
-  const sendMsg = {
-    send: {
-      contract: data.tokenContract,
-      amount: data.tokenAmount.toString(),
-      msg: Buffer.from(JSON.stringify(hookMsg)).toString('base64')
-    }
+  const fee = {
+    amount: [{ denom: "upaxi", amount: "500000" }],
+    gas: "600000"
   };
   
-  // Attach PAXI
-  const funds = [
-    { denom: 'upaxi', amount: data.paxiAmount.toString() }
-  ];
+  const result = await client.signAndBroadcast(
+    account.address,
+    [msg],
+    fee,
+    "Add Liquidity"
+  );
   
-  try {
-    const result = await client.execute(
-      account.address,
-      data.tokenContract,
-      sendMsg,
-      "auto",
-      poolExists ? "Add liquidity to existing pool" : "Create pool and add liquidity",
-      funds
-    );
-    
-    console.log("✅ Success! TX:", result.transactionHash);
-    
-    return {
-      success: true,
-      txHash: result.transactionHash,
-      approveTxHash: approveResult.transactionHash,
-      method: "javascript",
-      poolCreated: !poolExists,
-      height: result.height
-    };
-    
-  } catch (e) {
-    console.error("❌ Execution failed:", e);
-    
-    // Fallback: Try direct execute on token contract
-    console.log("\n🔄 Trying alternative method...");
-    
-    try {
-      const directMsg = {
-        provide_liquidity: {}
-      };
-      
-      const result2 = await client.execute(
-        account.address,
-        data.tokenContract,
-        directMsg,
-        "auto",
-        "Add liquidity",
-        funds
-      );
-      
-      console.log("✅ Success with alternative method! TX:", result2.transactionHash);
-      
-      return {
-        success: true,
-        txHash: result2.transactionHash,
-        approveTxHash: approveResult.transactionHash,
-        method: "javascript-alternative"
-      };
-      
-    } catch (e2) {
-      throw new Error(`Both methods failed. Error: ${e.message} | ${e2.message}`);
-    }
+  if (result.code !== 0) {
+    throw new Error(result.rawLog);
   }
+  
+  return {
+    txHash: result.transactionHash,
+    height: result.height,
+    method: "swap-module"
+  };
 }
 
 async function executeRemoveLiquidity(mnemonic, data) {
