@@ -1,4 +1,4 @@
-'# =========================
+# =========================
 # STAGE 1: build paxid + wasmvm
 # =========================
 FROM golang:1.24-bookworm AS paxid-builder
