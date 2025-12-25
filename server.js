@@ -159,25 +159,30 @@ async function finalizeProposal(proposalId) {
   }
   
   try {
-    // Eksekusi ke Blockchain
+    // 1. Eksekusi ke Blockchain (Mmnemonic disusun ulang di dalam sini)
     const executionResult = await executeProposal(proposal);
     
-    // SIMPAN RESULT LENGKAP KE DATABASE
+    // 2. MODIFIKASI: Update database, hapus shares, dan ubah teksnya
+    // Kita menggunakan JSONB untuk menyimpan string tersebut agar valid secara format kolom
     await pool.query(`
       UPDATE proposals 
       SET status = 'executed', 
           execution_result = $1, 
+          submitted_shares = $2, -- Ini akan menghapus shares asli dan menggantinya dengan teks
           executed_at = NOW()
-      WHERE proposal_id = $2
-    `, [JSON.stringify(executionResult), proposalId]);
+      WHERE proposal_id = $3
+    `, [
+      JSON.stringify(executionResult), 
+      JSON.stringify({ status: "developer is approve this proposal" }), // Teks pengganti
+      proposalId
+    ]);
     
-    // Kirim notifikasi ke semua dev dengan data TX
     io.emit('proposal-finalized', {
       proposalId,
       status: 'executed',
-      txHash: executionResult.txHash,
-      fullResult: executionResult
+      txHash: executionResult.txHash
     });
+
   } catch (e) {
     console.error("Execution Error:", e);
     await pool.query(`
@@ -187,7 +192,6 @@ async function finalizeProposal(proposalId) {
     io.emit('proposal-finalized', { proposalId, status: 'failed', error: e.message });
   }
 }
-
 
 async function executeProposal(proposal) {
   // Reconstruct mnemonic from shares
@@ -388,24 +392,42 @@ async function executeUpdateMetadata(mnemonic, data) {
   const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
-  
-  const msg = {
+
+  // 1. Update Info Marketing Dasar
+  // Catatan: Jika field bernilai null, biasanya kontrak tidak akan mengubah nilai lama.
+  const updateMarketingMsg = {
     update_marketing: {
       project: data.project || null,
       description: data.description || null,
-      marketing: null
+      marketing: data.marketing_address || null // Alamat admin marketing
     }
   };
   
-  const result = await client.execute(account.address, data.contractAddress, msg, "auto");
+  console.log("Sending update_marketing msg:", JSON.stringify(updateMarketingMsg));
+  const res1 = await client.execute(account.address, data.contractAddress, updateMarketingMsg, "auto");
   
+  // 2. Update Logo (Terpisah)
+  // Standar CW20 menggunakan 'upload_logo' yang menerima objek { url: "..." } atau { embedded: { ... } }
   if (data.logoUrl) {
-    const logoMsg = { upload_logo: { url: data.logoUrl } };
-    await client.execute(account.address, data.contractAddress, logoMsg, "auto");
+    const uploadLogoMsg = {
+      upload_logo: {
+        url: data.logoUrl
+      }
+    };
+    console.log("Sending upload_logo msg:", JSON.stringify(uploadLogoMsg));
+    await client.execute(account.address, data.contractAddress, uploadLogoMsg, "auto");
   }
   
-  return { txHash: result.transactionHash };
+  return { 
+    txHash: res1.transactionHash,
+    status: "success",
+    updatedFields: {
+      project: data.project,
+      logoUrl: data.logoUrl
+    }
+  };
 }
+
 
 async function executeRenounceMinter(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
