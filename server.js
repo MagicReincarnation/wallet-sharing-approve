@@ -522,7 +522,7 @@ async function executeAddLiquidityViaCLI(mnemonic, data) {
 }
 
 async function executeAddLiquidityViaJS(mnemonic, data) {
-  console.log("🔧 Adding Liquidity via JavaScript (2-Step)...");
+  console.log("🔧 Adding Liquidity via JavaScript...");
   
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, {
     prefix: "paxi",
@@ -533,42 +533,38 @@ async function executeAddLiquidityViaJS(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  const SWAP_MODULE = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
+  console.log("Wallet:", account.address);
+  console.log("Token:", data.tokenContract);
+  console.log("PAXI:", data.paxiAmount, "Token:", data.tokenAmount);
   
-  // STEP 1: Approve
-  console.log("📝 Step 1: Approving token...");
+  // Query pool info
+  console.log("\n🔍 Querying pool...");
+  const poolRes = await fetch(`${LCD}/paxi/swap/pool/${data.tokenContract}`);
+  const poolData = await poolRes.json();
   
-  const approveMsg = {
-    increase_allowance: {
-      spender: SWAP_MODULE,
-      amount: data.tokenAmount.toString()
+  if (!poolData.pool) {
+    throw new Error(`Pool not found for token: ${data.tokenContract}. Please create pool first.`);
+  }
+  
+  console.log("✅ Pool found");
+  console.log("PAXI Reserve:", poolData.pool.paxi_reserve);
+  console.log("Token Reserve:", poolData.pool.prc20_reserve);
+  
+  // IMPORTANT: For Paxi, we need to send BOTH tokens together
+  // Step 1: Approve is already done in previous attempt
+  
+  // Step 2: Use correct method - send token with PAXI attached
+  console.log("\n💧 Providing liquidity...");
+  
+  const provideLiquidityMsg = {
+    provide_liquidity: {
+      paxi_amount: data.paxiAmount.toString(),
+      token_amount: data.tokenAmount.toString(),
+      slippage_tolerance: "0.01" // 1%
     }
   };
   
-  const approveResult = await client.execute(
-    account.address,
-    data.tokenContract,
-    approveMsg,
-    "auto",
-    "Approve for liquidity"
-  );
-  
-  console.log("✅ Approved:", approveResult.transactionHash);
-  await new Promise(resolve => setTimeout(resolve, 6000));
-  
-  // STEP 2: Send token with PAXI attached
-  console.log("💧 Step 2: Providing liquidity...");
-  
-  const sendMsg = {
-    send: {
-      contract: SWAP_MODULE,
-      amount: data.tokenAmount.toString(),
-      msg: Buffer.from(JSON.stringify({
-        provide_liquidity: {}
-      })).toString('base64')
-    }
-  };
-  
+  // Execute on token contract directly
   const funds = [
     { denom: 'upaxi', amount: data.paxiAmount.toString() }
   ];
@@ -576,19 +572,19 @@ async function executeAddLiquidityViaJS(mnemonic, data) {
   const result = await client.execute(
     account.address,
     data.tokenContract,
-    sendMsg,
+    provideLiquidityMsg,
     "auto",
-    "Provide liquidity",
+    "Add liquidity",
     funds
   );
   
-  console.log("✅ Liquidity Added:", result.transactionHash);
+  console.log("✅ Success! TX:", result.transactionHash);
   
   return {
     success: true,
     txHash: result.transactionHash,
-    approveTxHash: approveResult.transactionHash,
-    method: "javascript"
+    method: "javascript",
+    height: result.height
   };
 }
 
