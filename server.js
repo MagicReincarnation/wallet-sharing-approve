@@ -1,3 +1,4 @@
+// ===== DEPENDENCIES =====
 const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -9,14 +10,6 @@ const cors = require('cors');
 const { DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
 const { SigningCosmWasmClient } = require("@cosmjs/cosmwasm-stargate");
 const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
-// Di bagian require (paling atas)
-const { exec } = require('child_process');
-const util = require('util');
-const execPromise = util.promisify(exec);
-const fs = require('fs').promises;
-const os = require('os');
-// gunakan PATH eksplisit + fallback
-const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
@@ -31,14 +24,15 @@ const io = socketIO(server, {
 app.use(cors());
 app.use(express.json());
 
-// ===== CONFIG TAMBAHAN =====
-const CHAIN_ID = "paxi-mainnet"; // chain ID Paxinet mainnet
+// ===== CONFIG =====
+const AUTHORIZED_DEVS = (process.env.DEV_ADDRESSES || '').split(',').map(a => a.trim()).filter(Boolean);
+const RPC = 'https://mainnet-rpc.paxinet.io';
+const LCD = 'https://mainnet-lcd.paxinet.io';
 const SWAP_MODULE_ADDRESS = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
-const PAXID_BIN = process.env.PAXID_BIN || "/usr/local/bin/paxid";
-
-// ===== DECIMAL HELPERS (WAJIB TAMBAH) =====
 const CW20_DECIMALS = 6n;
+const sessions = new Map();
 
+// ===== HELPER FUNCTIONS =====
 function toBaseUnit(amount, decimals = CW20_DECIMALS) {
   if (amount === undefined || amount === null) {
     throw new Error("Amount is required");
@@ -50,36 +44,31 @@ function toBaseUnit(amount, decimals = CW20_DECIMALS) {
   return BigInt(whole + paddedFraction).toString();
 }
 
+async function checkPoolExists(tokenContract) {
+  try {
+    const response = await fetch(`${LCD}/paxi/swap/pool/${tokenContract}`);
+    const data = await response.json();
+    
+    if (response.ok && data.pool) {
+      console.log("✅ Pool exists:", data.pool);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.log("❌ Pool check error:", e.message);
+    return false;
+  }
+}
+
 // ===== DATABASE =====
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// ===== BAGIAN 3: UPDATE DATABASE SCHEMA =====
-// Tambahkan kolom last_voter di tabel proposals
-async function updateDatabaseSchema() {
-  const client = await pool.connect();
-  try {
-    // Tambah kolom last_voter untuk tracking
-    await client.query(`
-      ALTER TABLE proposals 
-      ADD COLUMN IF NOT EXISTS last_voter TEXT;
-    `);
-    
-    console.log('✅ Database schema updated: added last_voter column');
-  } catch (e) {
-    console.error('❌ Database schema update error:', e);
-  } finally {
-    client.release();
-  }
-}
-
-// Panggil fungsi ini di initDB()
 async function initDB() {
   const client = await pool.connect();
   try {
-    // Create tables (kode existing Anda)
     await client.query(`
       CREATE TABLE IF NOT EXISTS wallet_state (
         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -110,7 +99,6 @@ async function initDB() {
       );
     `);
     
-    // Migrasi untuk database lama
     await client.query(`
       ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS wallet_paxi_address TEXT;
       ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
@@ -128,57 +116,8 @@ async function initDB() {
   }
 }
 
-
 initDB();
 
-// ===== PERBAIKI VALIDASI CLI =====
-async function verifyPaxid() {
-  try {
-    // 1. pastikan binary bisa dieksekusi
-    await execPromise(`${PAXID_BIN} version`);
-    console.log(`✅ Paxi CLI Found: ${PAXID_BIN}`);
-  } catch (e) {
-    throw new Error("❌ paxid binary tidak bisa dijalankan");
-  }
-  
-  try {
-    // 2. swap command HARUS dicek TANPA tx
-    await execPromise(`${PAXID_BIN} query swap pools --help`);
-    console.log("✅ Swap module available");
-  } catch (e) {
-    throw new Error("❌ Swap module TIDAK tersedia di binary ini");
-  }
-}
-
-// Add at top of server.js after requires
-async function checkPaxiCLI() {
-  try {
-    const { stdout } = await execPromise('which paxid');
-    const paxidPath = stdout.trim();
-    console.log('✅ Paxi CLI Found:', paxidPath);
-    
-    const { stdout: version } = await execPromise('paxid version');
-    console.log('📦 Version:', version.trim());
-    
-    return true;
-  } catch (e) {
-    console.error('❌ Paxi CLI Not Found!');
-    console.error('Please install: npm run install-cli');
-    console.error('Or manually: wget https://github.com/paxi-web3/paxi/releases/latest/download/paxid-linux-amd64 && chmod +x paxid-linux-amd64 && sudo mv paxid-linux-amd64 /usr/local/bin/paxid');
-    return false;
-  }
-}
-
-// Call at startup (add after initDB())
-checkPaxiCLI();
-verifyCLICommands();
-// ===== CONFIG =====
-const AUTHORIZED_DEVS = (process.env.DEV_ADDRESSES || '').split(',').map(a => a.trim()).filter(Boolean);
-const RPC = 'https://mainnet-rpc.paxinet.io';
-const LCD = 'https://mainnet-lcd.paxinet.io';
-const sessions = new Map();
-
-// ===== HELPERS =====
 async function getState() {
   const res = await pool.query('SELECT * FROM wallet_state WHERE id = 1');
   return res.rows[0];
@@ -192,7 +131,6 @@ async function updateState(updates) {
 }
 
 // ===== GOVERNANCE FUNCTIONS =====
-
 async function createProposal(proposer, actionType, actionData) {
   const proposalId = crypto.randomBytes(16).toString('hex');
   
@@ -203,9 +141,6 @@ async function createProposal(proposer, actionType, actionData) {
   
   return proposalId;
 }
-
-// ===== BAGIAN 1: UPDATE FUNGSI voteProposal =====
-// Tambahkan tracking untuk mengetahui siapa voter terakhir
 
 async function voteProposal(proposalId, voter, vote, share = null) {
   const result = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
@@ -222,7 +157,6 @@ async function voteProposal(proposalId, voter, vote, share = null) {
     submittedShares[voter] = share;
   }
   
-  // UPDATE: Simpan voter terakhir untuk rollback jika gagal
   await pool.query(`
     UPDATE proposals 
     SET votes = $1, 
@@ -232,7 +166,6 @@ async function voteProposal(proposalId, voter, vote, share = null) {
     WHERE proposal_id = $3
   `, [JSON.stringify(votes), JSON.stringify(submittedShares), proposalId, voter]);
   
-  // Check if all voted
   const totalVotes = Object.keys(votes).length;
   if (totalVotes === AUTHORIZED_DEVS.length) {
     await finalizeProposal(proposalId);
@@ -240,9 +173,6 @@ async function voteProposal(proposalId, voter, vote, share = null) {
   
   return { votes, totalVotes, required: AUTHORIZED_DEVS.length };
 }
-
-// ===== BAGIAN 2: UPDATE FUNGSI finalizeProposal =====
-// Tambahkan rollback mechanism ketika eksekusi gagal
 
 async function finalizeProposal(proposalId) {
   const result = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
@@ -265,10 +195,8 @@ async function finalizeProposal(proposalId) {
   }
   
   try {
-    // Eksekusi ke Blockchain
     const executionResult = await executeProposal(proposal);
     
-    // Jika berhasil, update status executed dan hapus shares
     await pool.query(`
       UPDATE proposals 
       SET status = 'executed', 
@@ -291,21 +219,16 @@ async function finalizeProposal(proposalId) {
   } catch (e) {
     console.error("Execution Error:", e);
     
-    // ===== ROLLBACK LOGIC =====
-    // Ambil last_voter dan hapus vote-nya dari database
     const lastVoter = proposal.last_voter;
     const currentVotes = proposal.votes || {};
     const currentShares = proposal.submitted_shares || {};
     
-    // Hapus vote dan share dari voter terakhir
     if (lastVoter) {
       delete currentVotes[lastVoter];
       delete currentShares[lastVoter];
-      
       console.log(`🔄 Rolling back vote from ${lastVoter}`);
     }
     
-    // Kembalikan status ke pending
     await pool.query(`
       UPDATE proposals 
       SET status = 'pending',
@@ -326,7 +249,6 @@ async function finalizeProposal(proposalId) {
       proposalId
     ]);
     
-    // Emit event untuk notify frontend bahwa proposal di-rollback
     io.emit('proposal-rollback', {
       proposalId,
       status: 'pending',
@@ -335,24 +257,11 @@ async function finalizeProposal(proposalId) {
       remainingVotes: Object.keys(currentVotes).length,
       requiredVotes: AUTHORIZED_DEVS.length
     });
-    
-    // Juga emit update-state agar UI refresh
-    const updatedProposal = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
-    io.emit('proposal-voted', {
-      proposalId,
-      votes: currentVotes,
-      totalVotes: Object.keys(currentVotes).length,
-      required: AUTHORIZED_DEVS.length
-    });
   }
 }
 
-
-
 async function executeProposal(proposal) {
-  // Reconstruct mnemonic from shares
   const submittedShares = proposal.submitted_shares || {};
-  // Susun ulang share berdasarkan urutan AUTHORIZED_DEVS agar sesuai dengan algoritma SSS
   const sharesList = AUTHORIZED_DEVS.map(addr => submittedShares[addr]).filter(Boolean);
   
   if (sharesList.length !== AUTHORIZED_DEVS.length) {
@@ -361,11 +270,11 @@ async function executeProposal(proposal) {
   
   const mnemonicHex = secrets.combine(sharesList);
   const mnemonic = Buffer.from(mnemonicHex, 'hex').toString();
-  // Validasi tambahan sebelum digunakan
+  
   if (!bip39.validateMnemonic(mnemonic)) {
     throw new Error('Critical: Reconstructed mnemonic is invalid. Verification failed.');
   }
-  // Execute action based on type
+  
   const actionData = typeof proposal.action_data === 'string' ?
     JSON.parse(proposal.action_data) :
     proposal.action_data;
@@ -404,8 +313,6 @@ async function executeProposal(proposal) {
       throw new Error('Unknown action type');
   }
   
-  // IMPORTANT: Destroy mnemonic from memory
-  // (JavaScript garbage collection will handle this, but explicit clear)
   return result;
 }
 
@@ -506,30 +413,13 @@ async function executeBurnToken(mnemonic, data) {
   return { txHash: result.transactionHash };
 }
 
-
-// ===== INSTRUKSI PATCH =====
-// 1. Cari dan HAPUS fungsi executeAddLiquidity yang lama (baris ~568-620)
-// 2. Cari dan HAPUS fungsi executeRemoveLiquidity yang lama (baris ~625-660)
-// 3. Cari dan HAPUS fungsi executeAddLiquidityViaCLI yang lama (baris ~665-710)
-// 4. Cari dan HAPUS fungsi executeRemoveLiquidityViaCLI yang lama (baris ~712-740)
-// 5. COPY-PASTE semua kode di bawah ini SEBELUM fungsi executeUpdateMetadata
-
-// ===== HELPER: GET CHAIN ID =====
-async function getChainId() {
-  try {
-    const response = await fetch(`${RPC}/status`);
-    const data = await response.json();
-    const chainId = data.result.node_info.network;
-    console.log("✅ Chain ID from RPC:", chainId);
-    return chainId;
-  } catch (error) {
-    console.error("⚠️ Failed to fetch chain ID from RPC, using fallback");
-    // Fallback ke CHAIN_ID constant yang sudah didefinisikan di atas
-    return CHAIN_ID;
-  }
-}
-
+// ===== ADD LIQUIDITY (Fixed) =====
 async function executeAddLiquidity(mnemonic, data) {
+  console.log("💧 Adding Liquidity...");
+  console.log("Token:", data.tokenContract);
+  console.log("PAXI Amount:", data.paxiAmount);
+  console.log("Token Amount:", data.tokenAmount);
+  
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
   
@@ -537,115 +427,119 @@ async function executeAddLiquidity(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  // 1. Increase allowance
-  await client.execute(
-    account.address,
-    data.tokenContract,
-    {
+  try {
+    const poolExists = await checkPoolExists(data.tokenContract);
+    
+    if (!poolExists) {
+      console.log("⚠️ Pool doesn't exist, will create automatically...");
+    }
+    
+    // Step 1: Increase Allowance
+    console.log("📝 Step 1: Increasing allowance...");
+    const allowanceMsg = {
       increase_allowance: {
         spender: SWAP_MODULE_ADDRESS,
-        amount: toBaseUnit(data.tokenAmount)
+        amount: data.tokenAmount
       }
-    },
-    "auto"
-  );
-  
-  // 2. Provide liquidity melalui contract swap
-  const provideMsg = {
-    provide_liquidity: {
-      paxi_amount: toBaseUnit(data.paxiAmount),
-      prc20_amount: toBaseUnit(data.tokenAmount),
-      prc20_contract: data.tokenContract
-    }
-  };
-  
-  const res = await client.execute(
-    account.address,
-    SWAP_MODULE_ADDRESS,
-    provideMsg,
-    "auto",
-    [{ denom: "upaxi", amount: toBaseUnit(data.paxiAmount) }] // funds
-  );
-  
-  return { txHash: res.transactionHash };
-}
-
-async function executeRemoveLiquidity(mnemonic, data) {
-  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
-  const [account] = await wallet.getAccounts();
-  
-  const stargateClient = await SigningStargateClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
-  
-  const msgWithdrawLiquidity = {
-    typeUrl: "/paxi.swap.MsgWithdrawLiquidity",
-    value: {
-      sender: account.address,
-      lpAmount: toBaseUnit(data.lpAmount),
-      prc20Contract: data.tokenContract
-    }
-  };
-  
-  const fee = {
-    amount: [{ denom: "upaxi", amount: "5000" }],
-    gas: "200000"
-  };
-  
-  const res = await stargateClient.signAndBroadcast(account.address, [msgWithdrawLiquidity], fee);
-  return { txHash: res.transactionHash };
-}
-
-// ===== VERIFIKASI CLI COMMANDS (OPSIONAL, UNTUK DEBUG) =====
-// Tambahkan fungsi ini dan panggil di startup setelah checkPaxiCLI()
-async function verifyCLICommands() {
-  try {
-    console.log("🔍 Verifying Paxinet CLI commands...");
+    };
     
-    // Test 1: Cek swap module commands
-    try {
-      const { stdout } = await execPromise('paxid tx swap --help 2>&1');
-      console.log("✅ Swap module available");
-      
-      // Cek apakah provide-liquidity dan withdraw-liquidity ada
-      if (stdout.includes('provide-liquidity')) {
-        console.log("  ✅ provide-liquidity command found");
-      } else {
-        console.error("  ❌ provide-liquidity command NOT found");
-      }
-      
-      if (stdout.includes('withdraw-liquidity')) {
-        console.log("  ✅ withdraw-liquidity command found");
-      } else {
-        console.error("  ❌ withdraw-liquidity command NOT found");
-      }
-    } catch (e) {
-      console.error("❌ Swap module NOT available:", e.message);
-    }
+    const allowanceResult = await client.execute(
+      account.address,
+      data.tokenContract,
+      allowanceMsg,
+      "auto",
+      "Increase allowance for liquidity"
+    );
     
-    // Test 2: Cek chain ID
-    const chainId = await getChainId();
-    console.log(`✅ Chain ID: ${chainId}`);
+    console.log("✅ Allowance TX:", allowanceResult.transactionHash);
     
-    // Test 3: Cek RPC connection
-    try {
-      const response = await fetch(`${RPC}/status`);
-      if (response.ok) {
-        console.log("✅ RPC connection OK");
-      } else {
-        console.error("❌ RPC connection failed:", response.status);
+    // Wait for confirmation
+    await new Promise(resolve => setTimeout(resolve, 6000));
+    
+    // Step 2: Provide Liquidity
+    console.log(`💧 Step 2: ${poolExists ? 'Adding' : 'Creating pool &'} providing liquidity...`);
+    
+    const provideLiquidityMsg = {
+      provide_liquidity: {
+        prc20: data.tokenContract,
+        prc20_amount: data.tokenAmount
       }
-    } catch (e) {
-      console.error("❌ RPC connection error:", e.message);
-    }
+    };
+    
+    const result = await client.execute(
+      account.address,
+      SWAP_MODULE_ADDRESS,
+      provideLiquidityMsg,
+      "auto",
+      poolExists ? "Add liquidity to pool" : "Create pool with initial liquidity",
+      [{ denom: "upaxi", amount: data.paxiAmount }]
+    );
+    
+    console.log(`✅ ${poolExists ? 'Liquidity Added' : 'Pool Created & Liquidity Added'}! TX:`, result.transactionHash);
+    
+    return {
+      success: true,
+      txHash: result.transactionHash,
+      allowanceTxHash: allowanceResult.transactionHash,
+      height: result.height,
+      poolCreated: !poolExists
+    };
     
   } catch (error) {
-    console.error("⚠️ CLI verification failed:", error.message);
+    console.error("❌ Add liquidity failed:", error);
+    throw new Error(`Add liquidity failed: ${error.message}`);
   }
 }
 
-// PANGGIL fungsi ini di startup (tambahkan setelah checkPaxiCLI(); di baris ~147)
-// verifyCLICommands();
+// ===== WITHDRAW LIQUIDITY (Fixed) =====
+async function executeRemoveLiquidity(mnemonic, data) {
+  console.log("🔙 Withdrawing Liquidity...");
+  console.log("Token:", data.tokenContract);
+  console.log("LP Amount:", data.lpAmount);
+  
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
+  try {
+    const poolExists = await checkPoolExists(data.tokenContract);
+    if (!poolExists) {
+      throw new Error("Pool does not exist!");
+    }
+    
+    console.log("💧 Withdrawing liquidity...");
+    
+    const withdrawLiquidityMsg = {
+      withdraw_liquidity: {
+        prc20: data.tokenContract,
+        lp_amount: data.lpAmount
+      }
+    };
+    
+    const result = await client.execute(
+      account.address,
+      SWAP_MODULE_ADDRESS,
+      withdrawLiquidityMsg,
+      "auto",
+      "Withdraw liquidity from pool"
+    );
+    
+    console.log("✅ Liquidity Withdrawn! TX:", result.transactionHash);
+    
+    return {
+      success: true,
+      txHash: result.transactionHash,
+      lpAmount: data.lpAmount
+    };
+    
+  } catch (error) {
+    console.error("❌ Withdraw liquidity failed:", error);
+    throw new Error(`Withdraw liquidity failed: ${error.message}`);
+  }
+}
 
 async function executeUpdateMetadata(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
@@ -655,21 +549,17 @@ async function executeUpdateMetadata(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  // 1. Update Info Marketing Dasar
-  // Catatan: Jika field bernilai null, biasanya kontrak tidak akan mengubah nilai lama.
   const updateMarketingMsg = {
     update_marketing: {
       project: data.project || null,
       description: data.description || null,
-      marketing: data.marketing_address || null // Alamat admin marketing
+      marketing: data.marketing_address || null
     }
   };
   
   console.log("Sending update_marketing msg:", JSON.stringify(updateMarketingMsg));
   const res1 = await client.execute(account.address, data.contractAddress, updateMarketingMsg, "auto");
   
-  // 2. Update Logo (Terpisah)
-  // Standar CW20 menggunakan 'upload_logo' yang menerima objek { url: "..." } atau { embedded: { ... } }
   if (data.logoUrl) {
     const uploadLogoMsg = {
       upload_logo: {
@@ -689,7 +579,6 @@ async function executeUpdateMetadata(mnemonic, data) {
     }
   };
 }
-
 
 async function executeRenounceMinter(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
@@ -738,7 +627,6 @@ app.post('/api/wallet-info', async (req, res) => {
   
   const state = await getState();
   
-  // LOGIKA DIPERKETAT: Jika paxi_address ada, berarti wallet sudah aktif
   if (!state.wallet_paxi_address) {
     return res.json({ success: false, error: 'Wallet not generated yet' });
   }
@@ -746,14 +634,12 @@ app.post('/api/wallet-info', async (req, res) => {
   const walletAddress = state.wallet_paxi_address;
   
   try {
-    // Memastikan fetch menggunakan timeout agar tidak gantung
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     
     const balanceRes = await fetch(`${LCD}/cosmos/bank/v1beta1/balances/${walletAddress}`, { signal: controller.signal });
     const balanceData = await balanceRes.json();
     
-    // Gunakan query transfer.recipient DAN transfer.sender untuk history lengkap
     const txRes = await fetch(`${LCD}/cosmos/tx/v1beta1/txs?events=transfer.recipient='${walletAddress}'&order_by=ORDER_BY_DESC&pagination.limit=10`, { signal: controller.signal });
     const txData = await txRes.json();
     
@@ -763,7 +649,7 @@ app.post('/api/wallet-info', async (req, res) => {
       success: true,
       walletAddress,
       balances: balanceData.balances || [],
-      transactions: txData.tx_responses || [], // Paxinet/Cosmos biasanya menggunakan tx_responses
+      transactions: txData.tx_responses || [],
       totalTxs: txData.pagination?.total || 0
     });
   } catch (e) {
@@ -777,7 +663,6 @@ app.post('/api/wallet-info', async (req, res) => {
     });
   }
 });
-
 
 app.post('/api/proposals', async (req, res) => {
   const { sessionToken } = req.body;
@@ -806,6 +691,41 @@ app.post('/api/proposal/:id', async (req, res) => {
   res.json({ success: true, proposal: result.rows[0] });
 });
 
+app.post('/api/pool-info', async (req, res) => {
+  const { sessionToken, tokenContract } = req.body;
+  const session = sessions.get(sessionToken);
+  if (!session) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  
+  if (!tokenContract) {
+    return res.status(400).json({ success: false, error: 'Token contract required' });
+  }
+  
+  try {
+    const response = await fetch(`${LCD}/paxi/swap/pool/${tokenContract}`);
+    const data = await response.json();
+    
+    if (response.ok && data.pool) {
+      res.json({
+        success: true,
+        pool: data.pool,
+        exists: true
+      });
+    } else {
+      res.json({
+        success: false,
+        exists: false,
+        message: "Pool not found"
+      });
+    }
+  } catch (e) {
+    res.json({
+      success: false,
+      exists: false,
+      error: e.message
+    });
+  }
+});
+
 app.get('/health', (req, res) => res.json({ status: 'OK' }));
 
 // ===== SOCKET.IO =====
@@ -820,34 +740,23 @@ io.on('connection', (socket) => {
       if (!share) return socket.emit('import-failed', 'Share is empty');
       
       let state = await getState();
-      
-      // Ambil shares yang sudah ada di database, atau buat objek baru jika kosong
       const currentShares = state.shares || {};
-      
-      // Simpan share dev ini ke database
       currentShares[socket.devAddress] = share;
       
-      // Update database
       await updateState({
         shares: currentShares,
-        // Jika dev mengimport, otomatis dia dianggap sudah menyetujui (approvals)
         approvals: Array.from(new Set([...state.approvals, socket.devAddress]))
       });
       
-      // Cek apakah dengan import ini, semua share (5/5) sudah terkumpul
       const totalCollected = Object.keys(currentShares).length;
       
-      // Ganti bagian di dalam socket.on('import-share')
       if (totalCollected >= AUTHORIZED_DEVS.length && !state.wallet_generated) {
-        // JANGAN gunakan Object.values karena urutannya bisa berantakan
-        // Susun ulang berdasarkan urutan AUTHORIZED_DEVS yang baku di ENV
         const orderedShares = AUTHORIZED_DEVS.map(addr => currentShares[addr]).filter(Boolean);
         
         if (orderedShares.length === AUTHORIZED_DEVS.length) {
           const mnemonicHex = secrets.combine(orderedShares);
           const mnemonic = Buffer.from(mnemonicHex, 'hex').toString();
           
-          // Validasi apakah hasil combine adalah mnemonic yang sah
           if (!bip39.validateMnemonic(mnemonic)) {
             throw new Error('Mnemonic rekonstruksi tidak valid. Pastikan semua share benar.');
           }
@@ -855,23 +764,18 @@ io.on('connection', (socket) => {
           const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
           const [account] = await wallet.getAccounts();
           
-          // UPDATE DATABASE DENGAN ALAMAT YANG BENAR
           await updateState({
             wallet_generated: true,
-            wallet_paxi_address: account.address, // Penting agar API wallet-info tahu alamat mana yang diquery
+            wallet_paxi_address: account.address,
             updated_at: new Date()
           });
           
-          // Beritahu frontend untuk refresh data
           socket.emit('import-success', { address: account.address });
-          
         }
       }
       
-      
       socket.emit('import-success');
       
-      // Update semua orang tentang status terbaru
       const updatedState = await getState();
       io.emit('update-state', {
         approvals: updatedState.approvals,
@@ -944,7 +848,6 @@ io.on('connection', (socket) => {
     });
   });
   
-  // GOVERNANCE EVENTS
   socket.on('create-proposal', async (data) => {
     if (!socket.devAddress) return socket.emit('error-message', 'Not authenticated');
     
