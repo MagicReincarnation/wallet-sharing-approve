@@ -9,7 +9,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	bankkeeper "github.com/cosmos/cosmos-sdk/x/bank/keeper"
-	swaptypes "github.com/paxi-web3/paxi/x/swap/types"
+	swaptypes "github.com/MagicReincarnation/wallet-sharing-approve/x/swap/types"
 )
 
 type Keeper struct {

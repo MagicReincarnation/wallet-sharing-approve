@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/paxi-web3/paxi/app"
-	apptypes "github.com/paxi-web3/paxi/app/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/app"
+	apptypes "github.com/MagicReincarnation/wallet-sharing-approve/app/types"
 
 	"cosmossdk.io/log"
 	dbm "github.com/cosmos/cosmos-db"

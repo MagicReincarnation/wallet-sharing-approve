@@ -6,7 +6,7 @@ import (
 	cmtcfg "github.com/cometbft/cometbft/config"
 	cmttypes "github.com/cometbft/cometbft/types"
 	serverconfig "github.com/cosmos/cosmos-sdk/server/config"
-	apptypes "github.com/paxi-web3/paxi/app/types"
+	apptypes "github.com/MagicReincarnation/wallet-sharing-approve/app/types"
 )
 
 // initCometBFTConfig helps to override default CometBFT Config values.

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	types "github.com/paxi-web3/paxi/x/paxi/types"
+	types "github.com/MagicReincarnation/wallet-sharing-approve/x/paxi/types"
 )
 
 func (k Keeper) SetParams(ctx sdk.Context, params types.Params) {

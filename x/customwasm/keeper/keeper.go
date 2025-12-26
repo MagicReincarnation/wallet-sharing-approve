@@ -4,7 +4,7 @@ import (
 	store "cosmossdk.io/core/store"
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/paxi-web3/paxi/x/customwasm/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/customwasm/types"
 )
 
 type Keeper struct {

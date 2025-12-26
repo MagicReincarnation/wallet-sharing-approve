@@ -2,7 +2,7 @@ package client
 
 import (
 	"github.com/cosmos/cosmos-sdk/client"
-	"github.com/paxi-web3/paxi/x/swap/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/swap/types"
 	"github.com/spf13/cobra"
 )
 

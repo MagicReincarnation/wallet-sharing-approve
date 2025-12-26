@@ -6,7 +6,7 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
-	"github.com/paxi-web3/paxi/x/customwasm/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/customwasm/types"
 )
 
 type msgServer struct {

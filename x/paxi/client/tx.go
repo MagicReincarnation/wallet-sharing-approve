@@ -9,7 +9,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/client/flags"
 	"github.com/cosmos/cosmos-sdk/client/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/paxi-web3/paxi/x/paxi/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/paxi/types"
 	"github.com/spf13/cobra"
 )
 

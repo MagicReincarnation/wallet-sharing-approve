@@ -19,8 +19,8 @@ import (
 	gogoany "github.com/cosmos/gogoproto/types/any"
 	ibcexported "github.com/cosmos/ibc-go/v10/modules/core/exported"
 	ibctypes "github.com/cosmos/ibc-go/v10/modules/core/types"
-	paxitypes "github.com/paxi-web3/paxi/x/paxi/types"
-	swaptypes "github.com/paxi-web3/paxi/x/swap/types"
+	paxitypes "github.com/MagicReincarnation/wallet-sharing-approve/x/paxi/types"
+	swaptypes "github.com/MagicReincarnation/wallet-sharing-approve/x/swap/types"
 )
 
 const (

@@ -12,8 +12,8 @@ import (
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	bankkeeper "github.com/cosmos/cosmos-sdk/x/bank/keeper"
-	"github.com/paxi-web3/paxi/utils"
-	paxitypes "github.com/paxi-web3/paxi/x/paxi/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/utils"
+	paxitypes "github.com/MagicReincarnation/wallet-sharing-approve/x/paxi/types"
 )
 
 type Keeper struct {

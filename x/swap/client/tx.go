@@ -7,7 +7,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/client/flags"
 	"github.com/cosmos/cosmos-sdk/client/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/paxi-web3/paxi/x/swap/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/swap/types"
 	"github.com/spf13/cobra"
 )
 

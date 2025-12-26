@@ -9,9 +9,9 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/auth/ante"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
-	"github.com/paxi-web3/paxi/app/decorators"
-	customwasmkeeper "github.com/paxi-web3/paxi/x/customwasm/keeper"
-	paxikeeper "github.com/paxi-web3/paxi/x/paxi/keeper"
+	"github.com/MagicReincarnation/wallet-sharing-approve/app/decorators"
+	customwasmkeeper "github.com/MagicReincarnation/wallet-sharing-approve/x/customwasm/keeper"
+	paxikeeper "github.com/MagicReincarnation/wallet-sharing-approve/x/paxi/keeper"
 )
 
 // HandlerOptions are the options required for constructing a default SDK AnteHandler.

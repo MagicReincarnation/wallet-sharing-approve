@@ -13,8 +13,8 @@ import (
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
-	"github.com/paxi-web3/paxi/x/custommint/keeper"
-	customminttypes "github.com/paxi-web3/paxi/x/custommint/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/custommint/keeper"
+	customminttypes "github.com/MagicReincarnation/wallet-sharing-approve/x/custommint/types"
 )
 
 const (

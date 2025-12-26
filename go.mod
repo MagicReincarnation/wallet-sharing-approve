@@ -1,4 +1,4 @@
-module github.com/paxi-web3/paxi
+module github.com/MagicReincarnation/wallet-sharing-approve
 
 go 1.24.2
 

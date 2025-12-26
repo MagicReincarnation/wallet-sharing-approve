@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/paxi-web3/paxi/x/customwasm/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/customwasm/types"
 )
 
 type queryServer struct {

@@ -14,8 +14,8 @@ import (
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
-	"github.com/paxi-web3/paxi/x/customwasm/keeper"
-	"github.com/paxi-web3/paxi/x/customwasm/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/customwasm/keeper"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/customwasm/types"
 )
 
 const (

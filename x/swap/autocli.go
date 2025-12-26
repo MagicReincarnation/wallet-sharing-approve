@@ -3,7 +3,7 @@ package swap
 import (
 	autocliv1 "cosmossdk.io/api/cosmos/autocli/v1"
 	_ "cosmossdk.io/api/cosmos/crypto/ed25519" // register to that it shows up in protoregistry.GlobalTypes
-	"github.com/paxi-web3/paxi/x/swap/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/swap/types"
 )
 
 func (am AppModule) AutoCLIOptions() *autocliv1.ModuleOptions {

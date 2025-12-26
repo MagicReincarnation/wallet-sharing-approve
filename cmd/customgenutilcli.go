@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	paxi "github.com/paxi-web3/paxi"
-	"github.com/paxi-web3/paxi/app"
+	paxi "github.com/MagicReincarnation/wallet-sharing-approve"
+	"github.com/MagicReincarnation/wallet-sharing-approve/app"
 
 	cfg "github.com/cometbft/cometbft/config"
 	"github.com/cosmos/go-bip39"

@@ -3,7 +3,7 @@ package custommint
 import (
 	autocliv1 "cosmossdk.io/api/cosmos/autocli/v1"
 	_ "cosmossdk.io/api/cosmos/crypto/ed25519" // register to that it shows up in protoregistry.GlobalTypes
-	"github.com/paxi-web3/paxi/x/custommint/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/custommint/types"
 )
 
 func (am AppModule) AutoCLIOptions() *autocliv1.ModuleOptions {

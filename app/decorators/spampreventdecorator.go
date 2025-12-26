@@ -4,7 +4,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authkeeper "github.com/cosmos/cosmos-sdk/x/auth/keeper"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	paxikeeper "github.com/paxi-web3/paxi/x/paxi/keeper"
+	paxikeeper "github.com/MagicReincarnation/wallet-sharing-approve/x/paxi/keeper"
 )
 
 type SpamPreventDecorator struct {

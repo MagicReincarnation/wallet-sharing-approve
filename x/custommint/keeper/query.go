@@ -6,7 +6,7 @@ import (
 
 	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/paxi-web3/paxi/x/custommint/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/custommint/types"
 )
 
 type queryServer struct {

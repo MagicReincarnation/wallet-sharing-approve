@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/paxi-web3/paxi/app"
-	paxicmd "github.com/paxi-web3/paxi/cmd"
+	"github.com/MagicReincarnation/wallet-sharing-approve/app"
+	paxicmd "github.com/MagicReincarnation/wallet-sharing-approve/cmd"
 
 	clientv2helpers "cosmossdk.io/client/v2/helpers"
 	svrcmd "github.com/cosmos/cosmos-sdk/server/cmd"

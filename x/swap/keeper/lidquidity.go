@@ -7,8 +7,8 @@ import (
 	sdkmath "cosmossdk.io/math"
 	storetypes "cosmossdk.io/store/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/paxi-web3/paxi/utils"
-	"github.com/paxi-web3/paxi/x/swap/types"
+	"github.com/MagicReincarnation/wallet-sharing-approve/utils"
+	"github.com/MagicReincarnation/wallet-sharing-approve/x/swap/types"
 )
 
 // ProvideLiquidity processes a liquidity provision message. If the pool does not exist, it is created.

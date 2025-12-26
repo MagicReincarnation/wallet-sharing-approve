@@ -9,7 +9,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	bankkeeper "github.com/cosmos/cosmos-sdk/x/bank/keeper"
-	customminttypes "github.com/paxi-web3/paxi/x/custommint/types"
+	customminttypes "github.com/MagicReincarnation/wallet-sharing-approve/x/custommint/types"
 )
 
 type Keeper struct {

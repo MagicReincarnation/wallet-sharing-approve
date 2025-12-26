@@ -19,7 +19,7 @@ import (
 	stakingkeeper "github.com/cosmos/cosmos-sdk/x/staking/keeper"
 	"github.com/cosmos/cosmos-sdk/x/staking/types"
 	gogotypes "github.com/cosmos/gogoproto/types"
-	"github.com/paxi-web3/paxi/utils"
+	"github.com/MagicReincarnation/wallet-sharing-approve/utils"
 )
 
 type CustomStakingKeeper struct {

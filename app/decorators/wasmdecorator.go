@@ -5,7 +5,7 @@ import (
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	customwasmkeeper "github.com/paxi-web3/paxi/x/customwasm/keeper"
+	customwasmkeeper "github.com/MagicReincarnation/wallet-sharing-approve/x/customwasm/keeper"
 )
 
 type WasmDecorator struct {

@@ -12,7 +12,7 @@ import (
 
 	"cosmossdk.io/log"
 	confixcmd "cosmossdk.io/tools/confix/cmd"
-	"github.com/paxi-web3/paxi/app"
+	"github.com/MagicReincarnation/wallet-sharing-approve/app"
 
 	wasmcli "github.com/CosmWasm/wasmd/x/wasm/client/cli"
 	"github.com/cosmos/cosmos-sdk/client"
@@ -26,11 +26,11 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/module"
 	authcmd "github.com/cosmos/cosmos-sdk/x/auth/client/cli"
 	genutilcli "github.com/cosmos/cosmos-sdk/x/genutil/client/cli"
-	version "github.com/paxi-web3/paxi"
-	"github.com/paxi-web3/paxi/utils"
-	custommintcli "github.com/paxi-web3/paxi/x/custommint/client"
-	paxicli "github.com/paxi-web3/paxi/x/paxi/client"
-	swapcli "github.com/paxi-web3/paxi/x/swap/client"
+	version "github.com/MagicReincarnation/wallet-sharing-approve"
+	"github.com/MagicReincarnation/wallet-sharing-approve/utils"
+	custommintcli "github.com/MagicReincarnation/wallet-sharing-approve/x/custommint/client"
+	paxicli "github.com/MagicReincarnation/wallet-sharing-approve/x/paxi/client"
+	swapcli "github.com/MagicReincarnation/wallet-sharing-approve/x/swap/client"
 )
 
 func initRootCmd(
