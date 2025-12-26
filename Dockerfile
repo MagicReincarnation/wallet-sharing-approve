@@ -57,7 +57,8 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install Node.js dependencies
-RUN npm ci --only=production
+# Use npm install instead of npm ci since package-lock.json might not exist
+RUN npm install --only=production
 
 # Copy application code
 COPY . .
