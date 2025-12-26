@@ -21,8 +21,11 @@ RUN git clone https://github.com/paxi-web3/paxi.git \
 RUN cp /root/paxid/paxid /usr/local/bin/paxid \
 && chmod +x /usr/local/bin/paxid
 
+# Find dan copy libwasmvm.x86_64.so
+RUN find /root/go/pkg/mod -name "libwasmvm.x86_64.so" -exec cp {} /usr/local/lib/libwasmvm.x86_64.so \;
+
 # Verify binary works
-RUN paxid version
+RUN ldconfig && paxid version
 
 # ===== Stage 2: Runtime image dengan Node.js =====
 FROM node:18-slim
@@ -32,8 +35,12 @@ RUN apt-get update && apt-get install -y \
 ca-certificates \
 && rm -rf /var/lib/apt/lists/*
 
-# Copy paxid binary dari builder stage
+# Copy paxid binary dan library dari builder stage
 COPY --from=builder /usr/local/bin/paxid /usr/local/bin/paxid
+COPY --from=builder /usr/local/lib/libwasmvm.x86_64.so /usr/local/lib/libwasmvm.x86_64.so
+
+# Update library cache
+RUN ldconfig
 
 # Verify paxid installation
 RUN paxid version
