@@ -533,45 +533,40 @@ async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
   
-  // 1. SigningCosmWasmClient untuk increase_allowance CW20
-  const wasmClient = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  await wasmClient.execute(
+  // 1. Increase allowance
+  await client.execute(
     account.address,
     data.tokenContract,
     {
       increase_allowance: {
-        spender: "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t",
+        spender: SWAP_MODULE_ADDRESS,
         amount: toBaseUnit(data.tokenAmount)
       }
     },
     "auto"
   );
   
-  // 2. SigningStargateClient untuk provide liquidity
-  const stargateClient = await SigningStargateClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
-  
-  const msgProvideLiquidity = {
-    typeUrl: "/x.swap.types.MsgProvideLiquidity",
-    value: {
-      creator: account.address,
-      prc20: data.tokenContract,
-      paxiAmount: toBaseUnit(data.paxiAmount),
-      prc20Amount: toBaseUnit(data.tokenAmount)
+  // 2. Provide liquidity melalui contract swap
+  const provideMsg = {
+    provide_liquidity: {
+      paxi_amount: toBaseUnit(data.paxiAmount),
+      prc20_amount: toBaseUnit(data.tokenAmount),
+      prc20_contract: data.tokenContract
     }
   };
   
-  // Fee dengan coin object yang benar
-  const fee = {
-    amount: [{ denom: "upaxi", amount: "5000" }],
-    gas: "200000"
-  };
+  const res = await client.execute(
+    account.address,
+    SWAP_MODULE_ADDRESS,
+    provideMsg,
+    "auto",
+    [{ denom: "upaxi", amount: toBaseUnit(data.paxiAmount) }] // funds
+  );
   
-  const res = await stargateClient.signAndBroadcast(account.address, [msgProvideLiquidity], fee);
   return { txHash: res.transactionHash };
 }
 
