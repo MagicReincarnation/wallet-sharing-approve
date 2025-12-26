@@ -123,9 +123,10 @@ async function initDB() {
 
 initDB();
 
-// ===== CHECK PAXID CLI =====
-async function checkPaxiCLI() {
+// ===== CHECK & INITIALIZE PAXID =====
+async function initializePaxid() {
   try {
+    // Check if paxid is installed
     const { stdout } = await execPromise('which paxid');
     const paxidPath = stdout.trim();
     console.log('✅ Paxi CLI Found:', paxidPath);
@@ -133,15 +134,19 @@ async function checkPaxiCLI() {
     const { stdout: version } = await execPromise('paxid version');
     console.log('📦 Version:', version.trim());
     
+    // Initialize paxid node (idempotent - safe to run multiple times)
+    const homeDir = '/tmp/paxid-home';
+    await execPromise(`paxid init temp-node --chain-id paxi-mainnet-1 --home ${homeDir} 2>&1 || true`);
+    console.log('✅ Paxid node initialized');
+    
     return true;
   } catch (e) {
-    console.error('❌ Paxi CLI Not Found!');
-    console.error('Make sure Dockerfile includes paxid installation');
+    console.error('❌ Paxi CLI initialization failed:', e.message);
     return false;
   }
 }
 
-checkPaxiCLI();
+initializePaxid();
 
 async function getState() {
   const res = await pool.query('SELECT * FROM wallet_state WHERE id = 1');
@@ -655,7 +660,7 @@ async function executeAddLiquidity(mnemonic, data) {
   console.log("PAXI Amount:", data.paxiAmount);
   console.log("Token Amount:", data.tokenAmount);
   
-  const tmpDir = await fs.mkdtemp(`${os.tmpdir()}/paxi-`);
+  const homeDir = '/tmp/paxid-home';
   const keyName = `multisig_${Date.now()}`;
   
   try {
@@ -667,7 +672,7 @@ async function executeAddLiquidity(mnemonic, data) {
     
     // Step 1: Import mnemonic
     console.log("📝 Step 1: Importing wallet...");
-    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test --home ${homeDir} 2>&1`;
     await execPromise(importCmd, { timeout: 10000 });
     console.log("✅ Wallet imported");
     
@@ -680,6 +685,7 @@ async function executeAddLiquidity(mnemonic, data) {
       }}' \
       --from ${keyName} \
       --keyring-backend test \
+      --home ${homeDir} \
       --chain-id paxi-mainnet-1 \
       --node ${RPC} \
       --gas auto \
@@ -708,6 +714,7 @@ async function executeAddLiquidity(mnemonic, data) {
       --prc20-amount "${data.tokenAmount}" \
       --from ${keyName} \
       --keyring-backend test \
+      --home ${homeDir} \
       --chain-id paxi-mainnet-1 \
       --node ${RPC} \
       --gas auto \
@@ -742,8 +749,7 @@ async function executeAddLiquidity(mnemonic, data) {
     
     // Cleanup
     console.log("🧹 Cleaning up...");
-    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --home ${homeDir} --yes 2>&1`);
     
     return {
       success: true,
@@ -759,11 +765,7 @@ async function executeAddLiquidity(mnemonic, data) {
     
     // Cleanup on error
     try {
-      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
-    } catch {}
-    
-    try {
-      await fs.rm(tmpDir, { recursive: true, force: true });
+      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --home ${homeDir} --yes 2>&1`);
     } catch {}
     
     throw new Error(`Add liquidity failed: ${error.message}`);
@@ -776,7 +778,7 @@ async function executeRemoveLiquidity(mnemonic, data) {
   console.log("Token:", data.tokenContract);
   console.log("LP Amount:", data.lpAmount);
   
-  const tmpDir = await fs.mkdtemp(`${os.tmpdir()}/paxi-`);
+  const homeDir = '/tmp/paxid-home';
   const keyName = `multisig_${Date.now()}`;
   
   try {
@@ -787,7 +789,7 @@ async function executeRemoveLiquidity(mnemonic, data) {
     
     // Step 1: Import wallet
     console.log("📝 Step 1: Importing wallet...");
-    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test --home ${homeDir} 2>&1`;
     await execPromise(importCmd, { timeout: 10000 });
     console.log("✅ Wallet imported");
     
@@ -798,6 +800,7 @@ async function executeRemoveLiquidity(mnemonic, data) {
       --lp-amount "${data.lpAmount}" \
       --from ${keyName} \
       --keyring-backend test \
+      --home ${homeDir} \
       --chain-id paxi-mainnet-1 \
       --node ${RPC} \
       --gas auto \
@@ -832,8 +835,7 @@ async function executeRemoveLiquidity(mnemonic, data) {
     
     // Cleanup
     console.log("🧹 Cleaning up...");
-    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --home ${homeDir} --yes 2>&1`);
     
     return {
       success: true,
@@ -847,11 +849,7 @@ async function executeRemoveLiquidity(mnemonic, data) {
     
     // Cleanup on error
     try {
-      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
-    } catch {}
-    
-    try {
-      await fs.rm(tmpDir, { recursive: true, force: true });
+      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --home ${homeDir} --yes 2>&1`);
     } catch {}
     
     throw new Error(`Withdraw liquidity failed: ${error.message}`);
