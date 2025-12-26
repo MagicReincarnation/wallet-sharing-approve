@@ -1,15 +1,14 @@
 # ===== STAGE 1: BUILD PAXID =====
-FROM golang:1.24-alpine AS builder
+FROM golang:1.24-bookworm AS builder
 
 WORKDIR /build
 
 # Install build dependencies
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     git \
     make \
     gcc \
-    musl-dev \
-    linux-headers
+    && rm -rf /var/lib/apt/lists/*
 
 # Clone Paxi repository
 RUN git clone https://github.com/paxi-web3/paxi.git . && \
@@ -17,21 +16,20 @@ RUN git clone https://github.com/paxi-web3/paxi.git . && \
 
 # Build paxid binary
 RUN make install && \
-    cp /root/go/bin/paxid /build/paxid || \
-    cp $HOME/go/bin/paxid /build/paxid
+    cp $(go env GOPATH)/bin/paxid /build/paxid
 
 # Verify binary
 RUN /build/paxid version
 
 # ===== STAGE 2: RUNTIME =====
-FROM node:18-alpine
+FROM node:18-bookworm-slim
 
 WORKDIR /app
 
 # Install runtime dependencies
-RUN apk add --no-cache \
-    bash \
-    ca-certificates
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy paxid binary from builder
 COPY --from=builder /build/paxid /usr/local/bin/paxid
