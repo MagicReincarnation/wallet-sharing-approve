@@ -4,15 +4,15 @@ FROM node:18-slim
 # Install dependencies untuk download dan extract
 RUN apt-get update && apt-get install -y \
 wget \
+curl \
 ca-certificates \
 && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
-# Download dan install Paxid CLI
-RUN wget -q https://github.com/paxi-web3/paxi/releases/latest/download/paxid-linux-amd64 -O /usr/local/bin/paxid \
-&& chmod +x /usr/local/bin/paxid \
+# Download dan install Paxid CLI menggunakan official install script
+RUN curl -sL https://raw.githubusercontent.com/paxi-web3/paxi/main/scripts/install.sh | bash \
 && paxid version
 
 # Copy package files
