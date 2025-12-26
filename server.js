@@ -500,7 +500,7 @@ async function executeAddLiquidity(mnemonic, data) {
     console.log(`💧 Step 3: ${poolExists ? 'Adding' : 'Creating pool &'} providing liquidity...`);
     const liquidityCmd = `paxid tx swap provide-liquidity \
       --prc20 "${data.tokenContract}" \
-      --paxi-amount "${data.paxiAmount}" \
+      --paxi-amount "${data.paxiAmount}upaxi" \
       --prc20-amount "${data.tokenAmount}" \
       --from ${keyName} \
       --keyring-backend test \
