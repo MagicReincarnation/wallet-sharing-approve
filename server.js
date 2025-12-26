@@ -529,118 +529,67 @@ async function getChainId() {
   }
 }
 
-// ===== PERBAIKAN: ADD LIQUIDITY SESUAI DOKUMENTASI RESMI PAXI =====
 async function executeAddLiquidity(mnemonic, data) {
-  console.log("💧 Add Liquidity (provide-liquidity)");
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
   
-  const chainId = CHAIN_ID;
-  const keyName = `addlp_${Date.now()}`;
-  
-  try {
-    // 1. Import key
-    await execPromise(
-      `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test -y`
-    );
-    
-    // 2. Increase allowance CW20 → swap module
-    const allowanceMsg = JSON.stringify({
+  // 1. Increase allowance kepada swap module
+  await client.execute(
+    account.address,
+    data.tokenContract,
+    {
       increase_allowance: {
-        spender: SWAP_MODULE_ADDRESS,
-        amount: data.tokenAmount
+        spender: SWAP_MODULE_ADDRESS, // ini harus "paxi1mfru9azs5..."
+        amount: toBaseUnit(data.tokenAmount)
       }
-    });
-    
-    await execPromise(
-      `paxid tx wasm execute ${data.tokenContract} '${allowanceMsg}' \
-      --from ${keyName} \
-      --keyring-backend test \
-      --chain-id ${chainId} \
-      --gas auto \
-      --fees 50000upaxi \
-      --node ${RPC} \
-      -y`
-    );
-    
-    // Tunggu konfirmasi allowance
-    await new Promise(r => setTimeout(r, 8000));
-    
-    // 3. Provide Liquidity (SESUIAI DOKUMENTASI)
-    const cmd = `
-      paxid tx swap provide-liquidity \
-      --prc20 ${data.tokenContract} \
-      --paxi-amount ${data.paxiAmount} \
-      --prc20-amount ${data.tokenAmount} \
-      --from ${keyName} \
-      --keyring-backend test \
-      --chain-id ${chainId} \
-      --gas auto \
-      --fees 50000upaxi \
-      --node ${RPC} \
-      -y
-    `;
-    
-    const { stdout } = await execPromise(cmd);
-    const txHash = stdout.match(/txhash:\s*([A-F0-9]+)/i)?.[1];
-    
-    if (!txHash) throw new Error("TX hash tidak ditemukan");
-    
-    return {
-      success: true,
-      txHash,
-      action: "provide-liquidity"
-    };
-    
-  } finally {
-    await execPromise(
-      `paxid keys delete ${keyName} --keyring-backend test -y`
-    ).catch(() => {});
-  }
+    },
+    "auto"
+  );
+  
+  // 2. Panggil provide_liquidity ke swap module sesuai docs
+  const provideMsg = {
+    provide_liquidity: {
+      paxi_amount: toBaseUnit(data.paxiAmount),
+      prc20_amount: toBaseUnit(data.tokenAmount),
+      prc20_contract: data.tokenContract
+    }
+  };
+  
+  const res = await client.execute(
+    account.address,
+    SWAP_MODULE_ADDRESS, // panggil modul swap, bukan token contract
+    provideMsg,
+    "auto"
+  );
+  
+  return { txHash: res.transactionHash };
 }
 
-
-// ===== PERBAIKAN: REMOVE LIQUIDITY SESUAI DOKUMENTASI RESMI PAXI =====
 async function executeRemoveLiquidity(mnemonic, data) {
-  console.log("🔙 Remove Liquidity (withdraw-liquidity)");
+  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
+  const [account] = await wallet.getAccounts();
+  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
   
-  const chainId = CHAIN_ID;
-  const keyName = `removelp_${Date.now()}`;
+  const withdrawMsg = {
+    withdraw_liquidity: {
+      lp_amount: toBaseUnit(data.lpAmount),
+      prc20_contract: data.tokenContract
+    }
+  };
   
-  try {
-    // 1. Import key
-    await execPromise(
-      `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test -y`
-    );
-    
-    // 2. Withdraw Liquidity
-    const cmd = `
-      paxid tx swap withdraw-liquidity \
-      --prc20 ${data.tokenContract} \
-      --lp-amount ${data.lpAmount} \
-      --from ${keyName} \
-      --keyring-backend test \
-      --chain-id ${chainId} \
-      --gas auto \
-      --fees 50000upaxi \
-      --node ${RPC} \
-      -y
-    `;
-    
-    const { stdout } = await execPromise(cmd);
-    const txHash = stdout.match(/txhash:\s*([A-F0-9]+)/i)?.[1];
-    
-    if (!txHash) throw new Error("TX hash tidak ditemukan");
-    
-    return {
-      success: true,
-      txHash,
-      action: "withdraw-liquidity"
-    };
-    
-  } finally {
-    await execPromise(
-      `paxid keys delete ${keyName} --keyring-backend test -y`
-    ).catch(() => {});
-  }
+  const res = await client.execute(
+    account.address,
+    SWAP_MODULE_ADDRESS,
+    withdrawMsg,
+    "auto"
+  );
+  
+  return { txHash: res.transactionHash };
 }
 
 // ===== VERIFIKASI CLI COMMANDS (OPSIONAL, UNTUK DEBUG) =====
