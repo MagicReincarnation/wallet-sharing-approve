@@ -149,7 +149,7 @@ async function checkPaxiCLI() {
 
 // Call at startup (add after initDB())
 checkPaxiCLI();
-
+verifyCLICommands();
 // ===== CONFIG =====
 const AUTHORIZED_DEVS = (process.env.DEV_ADDRESSES || '').split(',').map(a => a.trim()).filter(Boolean);
 const RPC = 'https://mainnet-rpc.paxinet.io';
@@ -484,29 +484,48 @@ async function executeBurnToken(mnemonic, data) {
   return { txHash: result.transactionHash };
 }
 
-// ===== PERBAIKAN UNTUK ADD LIQUIDITY =====
-// PAXINET SWAP MODULE MENGGUNAKAN NATIVE MODULE, BUKAN COSMWASM CONTRACT
+
+// ===== INSTRUKSI PATCH =====
+// 1. Cari dan HAPUS fungsi executeAddLiquidity yang lama (baris ~568-620)
+// 2. Cari dan HAPUS fungsi executeRemoveLiquidity yang lama (baris ~625-660)
+// 3. Cari dan HAPUS fungsi executeAddLiquidityViaCLI yang lama (baris ~665-710)
+// 4. Cari dan HAPUS fungsi executeRemoveLiquidityViaCLI yang lama (baris ~712-740)
+// 5. COPY-PASTE semua kode di bawah ini SEBELUM fungsi executeUpdateMetadata
+
+// ===== HELPER: GET CHAIN ID =====
+async function getChainId() {
+  try {
+    const response = await fetch(`${RPC}/status`);
+    const data = await response.json();
+    const chainId = data.result.node_info.network;
+    console.log("✅ Chain ID from RPC:", chainId);
+    return chainId;
+  } catch (error) {
+    console.error("⚠️ Failed to fetch chain ID from RPC, using fallback");
+    // Fallback ke CHAIN_ID constant yang sudah didefinisikan di atas
+    return CHAIN_ID;
+  }
+}
+
+// ===== ADD LIQUIDITY (CLI METHOD) =====
 async function executeAddLiquidity(mnemonic, data) {
-  console.log("💧 Adding Liquidity (Paxinet Native Module)...");
+  console.log("💧 Adding Liquidity via CLI...");
   console.log("Token:", data.tokenContract);
   console.log("PAXI Amount:", data.paxiAmount);
   console.log("Token Amount:", data.tokenAmount);
   
-  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
-  const [account] = await wallet.getAccounts();
-  
-  // PENTING: Untuk native module, gunakan SigningStargateClient, BUKAN SigningCosmWasmClient
-  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
+  const chainId = await getChainId();
+  const keyName = `liquidity_key_${Date.now()}`;
   
   try {
-    // Step 1: Increase Allowance untuk PRC20 token (ini tetap menggunakan CosmWasm)
-    console.log("📝 Step 1: Increasing allowance...");
+    // Step 1: Import key temporarily
+    console.log("🔑 Importing wallet key...");
+    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    const { stdout: importOut } = await execPromise(importCmd);
+    console.log("Key imported:", importOut.includes('address') ? '✅' : '⚠️');
     
-    const clientWasm = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
-      gasPrice: GasPrice.fromString("0.05upaxi")
-    });
+    // Step 2: Increase Allowance for PRC20 token
+    console.log("📝 Step 1: Increasing allowance for", data.tokenContract);
     
     const allowanceMsg = {
       increase_allowance: {
@@ -515,193 +534,195 @@ async function executeAddLiquidity(mnemonic, data) {
       }
     };
     
-    const allowanceResult = await clientWasm.execute(
-      account.address,
-      data.tokenContract,
-      allowanceMsg,
-      "auto",
-      "Increase allowance for liquidity"
-    );
+    const allowanceCmd = `paxid tx wasm execute ${data.tokenContract} '${JSON.stringify(allowanceMsg)}' --from ${keyName} --keyring-backend test --chain-id ${chainId} --gas auto --gas-adjustment 1.5 --fees 30000upaxi --node ${RPC} -y`;
     
-    console.log("✅ Allowance TX:", allowanceResult.transactionHash);
+    console.log("Executing allowance command...");
+    const { stdout: allowanceTx, stderr: allowanceErr } = await execPromise(allowanceCmd);
     
-    // Wait untuk konfirmasi blockchain
-    await new Promise(resolve => setTimeout(resolve, 6000));
+    if (allowanceErr && !allowanceErr.includes('gas estimate')) {
+      console.error("⚠️ Allowance stderr:", allowanceErr);
+    }
     
-    // Step 2: Provide Liquidity menggunakan MsgProvideLiquidity (native message)
-    console.log("💧 Step 2: Providing liquidity via native module...");
+    const allowanceTxHash = allowanceTx.match(/txhash:\s*([A-F0-9]+)/i)?.[1];
+    console.log("✅ Allowance TX:", allowanceTxHash || "submitted");
+    console.log("Full allowance output:", allowanceTx);
     
-    // Buat message menggunakan format Protobuf native Paxinet
-    // CATATAN: Karena ini native module, kita perlu menggunakan format yang berbeda
+    // Wait for confirmation
+    console.log("⏳ Waiting 8 seconds for blockchain confirmation...");
+    await new Promise(resolve => setTimeout(resolve, 8000));
     
-    // Opsi 1: Jika Paxinet punya message type untuk provide liquidity
-    const provideLiquidityMsg = {
-      typeUrl: "/paxi.swap.MsgProvideLiquidity", // Sesuaikan dengan protobuf path Paxinet
-      value: {
-        creator: account.address,
-        prc20: data.tokenContract,
-        prc20Amount: data.tokenAmount,
-        // PAXI amount akan dikirim via funds
+    // Step 3: Provide Liquidity
+    console.log("💧 Step 2: Providing liquidity...");
+    
+    const provideLiquidityCmd = `paxid tx swap provide-liquidity ${data.tokenContract} ${data.tokenAmount} ${data.paxiAmount}upaxi --from ${keyName} --keyring-backend test --chain-id ${chainId} --gas auto --gas-adjustment 1.5 --fees 30000upaxi --node ${RPC} -y`;
+    
+    console.log("Executing provide liquidity command...");
+    console.log("Command:", provideLiquidityCmd);
+    
+    const { stdout: provideTx, stderr: provideErr } = await execPromise(provideLiquidityCmd);
+    
+    if (provideErr) {
+      console.error("⚠️ Provide liquidity stderr:", provideErr);
+      
+      // Cek apakah ini command not found error
+      if (provideErr.includes('unknown command') || provideErr.includes('provide-liquidity')) {
+        throw new Error("Command 'paxid tx swap provide-liquidity' not found. Please check if swap module is available in your paxid version.");
       }
-    };
+    }
     
-    // Kirim transaction dengan funds PAXI
-    const result = await client.signAndBroadcast(
-      account.address,
-      [provideLiquidityMsg],
-      "auto",
-      "Provide liquidity to swap pool",
-      [{ denom: "upaxi", amount: data.paxiAmount }] // Funds PAXI
-    );
+    console.log("Provide liquidity stdout:", provideTx);
     
-    console.log("✅ Liquidity Provided! TX:", result.transactionHash);
+    const provideTxHash = provideTx.match(/txhash:\s*([A-F0-9]+)/i)?.[1];
+    
+    if (!provideTxHash) {
+      console.error("❌ Failed to parse TX hash from output");
+      throw new Error("Failed to provide liquidity: No transaction hash returned. Output: " + provideTx);
+    }
+    
+    console.log("✅ Liquidity Provided! TX:", provideTxHash);
+    
+    // Cleanup
+    console.log("🧹 Cleaning up temporary key...");
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch((e) => {
+      console.error("Warning: Failed to delete temp key:", e.message);
+    });
     
     return {
       success: true,
-      txHash: result.transactionHash,
-      allowanceTxHash: allowanceResult.transactionHash,
-      height: result.height
+      txHash: provideTxHash,
+      allowanceTxHash: allowanceTxHash,
+      method: "cli"
     };
     
   } catch (error) {
-    console.error("❌ Add liquidity failed:", error);
+    console.error("❌ Add liquidity failed:", error.message);
+    console.error("Full error:", error);
+    
+    // Cleanup on error
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch(() => {});
+    
     throw new Error(`Add liquidity failed: ${error.message}`);
   }
 }
 
-// ===== PERBAIKAN UNTUK REMOVE LIQUIDITY =====
+// ===== REMOVE LIQUIDITY (CLI METHOD) =====
 async function executeRemoveLiquidity(mnemonic, data) {
-  console.log("🔙 Withdrawing Liquidity (Paxinet Native Module)...");
+  console.log("🔙 Withdrawing Liquidity via CLI...");
   console.log("Token:", data.tokenContract);
   console.log("LP Amount:", data.lpAmount);
   
-  const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
-  const [account] = await wallet.getAccounts();
-  
-  // Gunakan SigningStargateClient untuk native module
-  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
-    gasPrice: GasPrice.fromString("0.05upaxi")
-  });
+  const chainId = await getChainId();
+  const keyName = `withdraw_key_${Date.now()}`;
   
   try {
-    console.log("💧 Withdrawing liquidity via native module...");
+    // Import key temporarily
+    console.log("🔑 Importing wallet key...");
+    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    const { stdout: importOut } = await execPromise(importCmd);
+    console.log("Key imported:", importOut.includes('address') ? '✅' : '⚠️');
     
-    // Buat message untuk withdraw liquidity
-    const withdrawLiquidityMsg = {
-      typeUrl: "/paxi.swap.MsgWithdrawLiquidity", // Sesuaikan dengan protobuf path Paxinet
-      value: {
-        creator: account.address,
-        prc20: data.tokenContract,
-        lpAmount: data.lpAmount
+    // Withdraw Liquidity
+    console.log("💧 Withdrawing liquidity...");
+    const withdrawCmd = `paxid tx swap withdraw-liquidity ${data.tokenContract} ${data.lpAmount} --from ${keyName} --keyring-backend test --chain-id ${chainId} --gas auto --gas-adjustment 1.5 --fees 30000upaxi --node ${RPC} -y`;
+    
+    console.log("Executing withdraw command...");
+    console.log("Command:", withdrawCmd);
+    
+    const { stdout: withdrawTx, stderr: withdrawErr } = await execPromise(withdrawCmd);
+    
+    if (withdrawErr) {
+      console.error("⚠️ Withdraw stderr:", withdrawErr);
+      
+      if (withdrawErr.includes('unknown command') || withdrawErr.includes('withdraw-liquidity')) {
+        throw new Error("Command 'paxid tx swap withdraw-liquidity' not found. Please check if swap module is available in your paxid version.");
       }
-    };
+    }
     
-    const result = await client.signAndBroadcast(
-      account.address,
-      [withdrawLiquidityMsg],
-      "auto",
-      "Withdraw liquidity from swap pool"
-    );
+    console.log("Withdraw stdout:", withdrawTx);
     
-    console.log("✅ Liquidity Withdrawn! TX:", result.transactionHash);
+    const txHash = withdrawTx.match(/txhash:\s*([A-F0-9]+)/i)?.[1];
+    
+    if (!txHash) {
+      console.error("❌ Failed to parse TX hash from output");
+      throw new Error("Failed to withdraw liquidity: No transaction hash returned. Output: " + withdrawTx);
+    }
+    
+    console.log("✅ Liquidity Withdrawn! TX:", txHash);
+    
+    // Cleanup
+    console.log("🧹 Cleaning up temporary key...");
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch((e) => {
+      console.error("Warning: Failed to delete temp key:", e.message);
+    });
     
     return {
       success: true,
-      txHash: result.transactionHash,
-      lpAmount: data.lpAmount
+      txHash: txHash,
+      lpAmount: data.lpAmount,
+      method: "cli"
     };
     
   } catch (error) {
-    console.error("❌ Withdraw liquidity failed:", error);
+    console.error("❌ Withdraw liquidity failed:", error.message);
+    console.error("Full error:", error);
+    
+    // Cleanup on error
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch(() => {});
+    
     throw new Error(`Withdraw liquidity failed: ${error.message}`);
   }
 }
 
-// ===== ALTERNATIF: JIKA PROTOBUF MESSAGE BELUM TERDAFTAR =====
-// Gunakan CLI Fallback (jika SDK belum support message type ini)
-async function executeAddLiquidityViaCLI(mnemonic, data) {
-  console.log("💧 Adding Liquidity via CLI...");
-  
-  // Simpan mnemonic sementara untuk CLI
-  const tmpMnemonicFile = `/tmp/mnemonic_${Date.now()}.txt`;
-  await fs.writeFile(tmpMnemonicFile, mnemonic);
-  
+// ===== VERIFIKASI CLI COMMANDS (OPSIONAL, UNTUK DEBUG) =====
+// Tambahkan fungsi ini dan panggil di startup setelah checkPaxiCLI()
+async function verifyCLICommands() {
   try {
-    // Import key dari mnemonic
-    const keyName = `temp_key_${Date.now()}`;
-    await execPromise(`echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test`);
+    console.log("🔍 Verifying Paxinet CLI commands...");
     
-    // Step 1: Increase allowance
-    console.log("📝 Step 1: Increasing allowance...");
-    const allowanceCmd = `paxid tx wasm execute ${data.tokenContract} '{"increase_allowance":{"spender":"${SWAP_MODULE_ADDRESS}","amount":"${data.tokenAmount}"}}' --from ${keyName} --keyring-backend test --chain-id ${CHAIN_ID} --gas auto --gas-adjustment 1.5 --fees 30000upaxi -y`;
+    // Test 1: Cek swap module commands
+    try {
+      const { stdout } = await execPromise('paxid tx swap --help 2>&1');
+      console.log("✅ Swap module available");
+      
+      // Cek apakah provide-liquidity dan withdraw-liquidity ada
+      if (stdout.includes('provide-liquidity')) {
+        console.log("  ✅ provide-liquidity command found");
+      } else {
+        console.error("  ❌ provide-liquidity command NOT found");
+      }
+      
+      if (stdout.includes('withdraw-liquidity')) {
+        console.log("  ✅ withdraw-liquidity command found");
+      } else {
+        console.error("  ❌ withdraw-liquidity command NOT found");
+      }
+    } catch (e) {
+      console.error("❌ Swap module NOT available:", e.message);
+    }
     
-    const { stdout: allowanceTx } = await execPromise(allowanceCmd);
-    console.log("✅ Allowance TX sent");
+    // Test 2: Cek chain ID
+    const chainId = await getChainId();
+    console.log(`✅ Chain ID: ${chainId}`);
     
-    // Wait
-    await new Promise(resolve => setTimeout(resolve, 6000));
-    
-    // Step 2: Provide liquidity via swap module
-    console.log("💧 Step 2: Providing liquidity...");
-    const provideLiquidityCmd = `paxid tx swap provide-liquidity ${data.tokenContract} ${data.tokenAmount} ${data.paxiAmount}upaxi --from ${keyName} --keyring-backend test --chain-id ${CHAIN_ID} --gas auto --gas-adjustment 1.5 --fees 30000upaxi -y`;
-    
-    const { stdout: provideTx } = await execPromise(provideLiquidityCmd);
-    
-    // Parse txhash dari output
-    const txHashMatch = provideTx.match(/txhash: ([A-F0-9]+)/i);
-    const txHash = txHashMatch ? txHashMatch[1] : null;
-    
-    console.log("✅ Liquidity provided! TX:", txHash);
-    
-    // Cleanup
-    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch(() => {});
-    await fs.unlink(tmpMnemonicFile).catch(() => {});
-    
-    return {
-      success: true,
-      txHash,
-      method: "cli"
-    };
+    // Test 3: Cek RPC connection
+    try {
+      const response = await fetch(`${RPC}/status`);
+      if (response.ok) {
+        console.log("✅ RPC connection OK");
+      } else {
+        console.error("❌ RPC connection failed:", response.status);
+      }
+    } catch (e) {
+      console.error("❌ RPC connection error:", e.message);
+    }
     
   } catch (error) {
-    // Cleanup on error
-    await fs.unlink(tmpMnemonicFile).catch(() => {});
-    throw error;
+    console.error("⚠️ CLI verification failed:", error.message);
   }
 }
 
-async function executeRemoveLiquidityViaCLI(mnemonic, data) {
-  console.log("🔙 Withdrawing Liquidity via CLI...");
-  
-  try {
-    // Import key dari mnemonic
-    const keyName = `temp_key_${Date.now()}`;
-    await execPromise(`echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test`);
-    
-    // Withdraw liquidity via swap module
-    const withdrawCmd = `paxid tx swap withdraw-liquidity ${data.tokenContract} ${data.lpAmount} --from ${keyName} --keyring-backend test --chain-id ${CHAIN_ID} --gas auto --gas-adjustment 1.5 --fees 30000upaxi -y`;
-    
-    const { stdout: withdrawTx } = await execPromise(withdrawCmd);
-    
-    // Parse txhash
-    const txHashMatch = withdrawTx.match(/txhash: ([A-F0-9]+)/i);
-    const txHash = txHashMatch ? txHashMatch[1] : null;
-    
-    console.log("✅ Liquidity withdrawn! TX:", txHash);
-    
-    // Cleanup
-    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch(() => {});
-    
-    return {
-      success: true,
-      txHash,
-      method: "cli"
-    };
-    
-  } catch (error) {
-    throw error;
-  }
-}
+// PANGGIL fungsi ini di startup (tambahkan setelah checkPaxiCLI(); di baris ~147)
+// verifyCLICommands();
 
 async function executeUpdateMetadata(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
