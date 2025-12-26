@@ -1,58 +1,36 @@
-# ===== STAGE 1: BUILD PAXID =====
-FROM golang:1.24-bookworm AS builder
+# ===== DOCKERFILE UNTUK SERVER.JS PAXI GOVERNANCE =====
+FROM node:20-alpine
 
-WORKDIR /build
+# Install dependency OS
+RUN apk add --no-cache \
+  bash \
+  curl \
+  ca-certificates \
+  libc6-compat
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    git \
-    make \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+# Install Paxi CLI
+RUN curl -L https://github.com/paxi-web3/paxi/releases/latest/download/paxid-linux-amd64 \
+  -o /usr/local/bin/paxid && \
+  chmod +x /usr/local/bin/paxid
 
-# Clone Paxi repository
-RUN git clone https://github.com/paxi-web3/paxi.git . && \
-    git checkout v1.0.6
-
-# Build paxid binary
-RUN make install && \
-    cp $(go env GOPATH)/bin/paxid /build/paxid
-
-# Verify binary
-RUN /build/paxid version
-
-# ===== STAGE 2: RUNTIME =====
-FROM node:18-bookworm-slim
-
+# Set working directory
 WORKDIR /app
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy paxid binary from builder
-COPY --from=builder /build/paxid /usr/local/bin/paxid
-RUN chmod +x /usr/local/bin/paxid
-
-# Verify paxid
-RUN paxid version
 
 # Copy package files
 COPY package*.json ./
 
-# Install npm dependencies
-RUN npm ci --only=production
+# Install dependencies
+RUN npm install --production
 
-# Copy application code
+# Copy source code
 COPY . .
+
+# Environment default
+ENV NODE_ENV=production
+ENV PORT=8080
 
 # Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:8080/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"
-
-# Start app
-CMD ["npm", "start"]
+# Start server
+CMD ["node", "start"]
