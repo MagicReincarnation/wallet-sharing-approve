@@ -1,4 +1,3 @@
-# Stage 1: gunakan image Debian slim
 FROM debian:bullseye-slim
 
 # Install dependency dasar
@@ -9,16 +8,17 @@ RUN apt-get update && apt-get install -y \
     jq \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Buat folder kerja
 WORKDIR /root/
 
-# Install Paxi prebuilt binary via script resmi
-RUN curl -sL https://raw.githubusercontent.com/paxi-web3/paxi/main/scripts/cli_install.sh | bash
+# Download binary Paxi langsung
+RUN curl -L -o paxid https://github.com/paxi-web3/paxi/releases/latest/download/paxid-linux-amd64 \
+    && chmod +x paxid \
+    && mv paxid /usr/local/bin/
 
-# Pastikan paxid ada di PATH
-ENV PATH="/root/.paxi/bin:${PATH}"
+# Pastikan paxid bisa di PATH
+ENV PATH="/usr/local/bin:${PATH}"
 
-# Expose port yang biasa digunakan Cosmos SDK / Paxi node
+# Expose port Cosmos SDK / Paxi
 EXPOSE 26656 26657 1317 9090
 
 # Default command untuk jalankan node
