@@ -1,33 +1,16 @@
 # =========================
-# STAGE 1: Build paxid CLI
+# STAGE 1: Download paxid binary
 # =========================
-FROM golang:1.22-alpine AS paxid-builder
+FROM alpine:latest AS paxid-downloader
 
 WORKDIR /build
 
-# Install build dependencies
-RUN apk add --no-cache \
-    git \
-    make \
-    gcc \
-    musl-dev \
-    linux-headers
+RUN apk add --no-cache wget
 
-# Clone Paxi repository
-RUN git clone https://github.com/paxi-web3/paxi.git
-
-WORKDIR /build/paxi
-
-# Build static binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -a \
-    -tags netgo \
-    -ldflags '-w -s -extldflags "-static"' \
-    -o /build/paxid \
-    ./cmd/paxid
-
-# Verify it's static
-RUN ldd /build/paxid || echo "Static binary confirmed"
+# Download pre-built binary from GitHub releases
+RUN wget https://github.com/paxi-web3/paxi/releases/latest/download/paxid-linux-amd64 \
+    && chmod +x paxid-linux-amd64 \
+    && mv paxid-linux-amd64 paxid
 
 # =========================
 # STAGE 2: Node.js Runtime
@@ -42,9 +25,8 @@ RUN apk add --no-cache \
     ca-certificates
 
 # Copy paxid binary
-COPY --from=paxid-builder /build/paxid /usr/local/bin/paxid
-RUN chmod +x /usr/local/bin/paxid && \
-    paxid version || echo "CLI ready"
+COPY --from=paxid-downloader /build/paxid /usr/local/bin/paxid
+RUN chmod +x /usr/local/bin/paxid
 
 # Copy package files
 COPY package*.json ./
