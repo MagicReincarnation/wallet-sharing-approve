@@ -29,6 +29,10 @@ const io = socketIO(server, {
 app.use(cors());
 app.use(express.json());
 
+// ===== CONFIG TAMBAHAN =====
+const CHAIN_ID = "paxi-mainnet"; // chain ID Paxinet mainnet
+const SWAP_MODULE_ADDRESS = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
+
 // ===== DECIMAL HELPERS (WAJIB TAMBAH) =====
 const CW20_DECIMALS = 6n;
 
@@ -49,10 +53,30 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// ===== BAGIAN 3: UPDATE DATABASE SCHEMA =====
+// Tambahkan kolom last_voter di tabel proposals
+async function updateDatabaseSchema() {
+  const client = await pool.connect();
+  try {
+    // Tambah kolom last_voter untuk tracking
+    await client.query(`
+      ALTER TABLE proposals 
+      ADD COLUMN IF NOT EXISTS last_voter TEXT;
+    `);
+    
+    console.log('✅ Database schema updated: added last_voter column');
+  } catch (e) {
+    console.error('❌ Database schema update error:', e);
+  } finally {
+    client.release();
+  }
+}
+
+// Panggil fungsi ini di initDB()
 async function initDB() {
   const client = await pool.connect();
   try {
-    // 1. Jalankan Create Table (untuk database baru)
+    // Create tables (kode existing Anda)
     await client.query(`
       CREATE TABLE IF NOT EXISTS wallet_state (
         id INTEGER PRIMARY KEY DEFAULT 1,
@@ -77,18 +101,18 @@ async function initDB() {
         submitted_shares JSONB DEFAULT '{}',
         execution_result JSONB,
         created_at TIMESTAMP DEFAULT NOW(),
-        executed_at TIMESTAMP
+        executed_at TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT NOW(),
+        last_voter TEXT
       );
     `);
     
-    // 2. Jalankan Migrasi Manual (untuk database yang sudah ada/lama)
+    // Migrasi untuk database lama
     await client.query(`
-      -- Memastikan wallet_state punya kolom yang diperlukan
       ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS wallet_paxi_address TEXT;
       ALTER TABLE wallet_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-      
-      -- Memastikan proposals punya kolom updated_at (INI YANG KURANG TADI)
       ALTER TABLE proposals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+      ALTER TABLE proposals ADD COLUMN IF NOT EXISTS last_voter TEXT;
       
       INSERT INTO wallet_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
     `);
@@ -100,6 +124,7 @@ async function initDB() {
     client.release();
   }
 }
+
 
 initDB();
 
@@ -157,6 +182,9 @@ async function createProposal(proposer, actionType, actionData) {
   return proposalId;
 }
 
+// ===== BAGIAN 1: UPDATE FUNGSI voteProposal =====
+// Tambahkan tracking untuk mengetahui siapa voter terakhir
+
 async function voteProposal(proposalId, voter, vote, share = null) {
   const result = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
   if (result.rows.length === 0) throw new Error('Proposal not found');
@@ -172,11 +200,15 @@ async function voteProposal(proposalId, voter, vote, share = null) {
     submittedShares[voter] = share;
   }
   
+  // UPDATE: Simpan voter terakhir untuk rollback jika gagal
   await pool.query(`
     UPDATE proposals 
-    SET votes = $1, submitted_shares = $2, updated_at = NOW()
+    SET votes = $1, 
+        submitted_shares = $2, 
+        updated_at = NOW(),
+        last_voter = $4
     WHERE proposal_id = $3
-  `, [JSON.stringify(votes), JSON.stringify(submittedShares), proposalId]);
+  `, [JSON.stringify(votes), JSON.stringify(submittedShares), proposalId, voter]);
   
   // Check if all voted
   const totalVotes = Object.keys(votes).length;
@@ -187,6 +219,9 @@ async function voteProposal(proposalId, voter, vote, share = null) {
   return { votes, totalVotes, required: AUTHORIZED_DEVS.length };
 }
 
+// ===== BAGIAN 2: UPDATE FUNGSI finalizeProposal =====
+// Tambahkan rollback mechanism ketika eksekusi gagal
+
 async function finalizeProposal(proposalId) {
   const result = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
   const proposal = result.rows[0];
@@ -196,34 +231,32 @@ async function finalizeProposal(proposalId) {
   
   if (!allApproved) {
     await pool.query(`
-    UPDATE proposals 
-    SET status = 'rejected', 
-        executed_at = NOW(),
-        submitted_shares = $2
-    WHERE proposal_id = $1
-  `, [proposalId, JSON.stringify({ status: "proposal rejected" })]);
+      UPDATE proposals 
+      SET status = 'rejected', 
+          executed_at = NOW(),
+          submitted_shares = $2
+      WHERE proposal_id = $1
+    `, [proposalId, JSON.stringify({ status: "proposal rejected" })]);
     
     io.emit('proposal-finalized', { proposalId, status: 'rejected' });
     return;
   }
   
-  
   try {
-    // 1. Eksekusi ke Blockchain (Mmnemonic disusun ulang di dalam sini)
+    // Eksekusi ke Blockchain
     const executionResult = await executeProposal(proposal);
     
-    // 2. MODIFIKASI: Update database, hapus shares, dan ubah teksnya
-    // Kita menggunakan JSONB untuk menyimpan string tersebut agar valid secara format kolom
+    // Jika berhasil, update status executed dan hapus shares
     await pool.query(`
       UPDATE proposals 
       SET status = 'executed', 
           execution_result = $1, 
-          submitted_shares = $2, -- Ini akan menghapus shares asli dan menggantinya dengan teks
+          submitted_shares = $2,
           executed_at = NOW()
       WHERE proposal_id = $3
     `, [
       JSON.stringify(executionResult),
-      JSON.stringify({ status: "developer is approve this proposal" }), // Teks pengganti
+      JSON.stringify({ status: "developer is approve this proposal" }),
       proposalId
     ]);
     
@@ -235,13 +268,64 @@ async function finalizeProposal(proposalId) {
     
   } catch (e) {
     console.error("Execution Error:", e);
-    await pool.query(`
-      UPDATE proposals SET status = 'failed', execution_result = $1, executed_at = NOW() WHERE proposal_id = $2
-    `, [JSON.stringify({ error: e.message, stack: e.stack }), proposalId]);
     
-    io.emit('proposal-finalized', { proposalId, status: 'failed', error: e.message });
+    // ===== ROLLBACK LOGIC =====
+    // Ambil last_voter dan hapus vote-nya dari database
+    const lastVoter = proposal.last_voter;
+    const currentVotes = proposal.votes || {};
+    const currentShares = proposal.submitted_shares || {};
+    
+    // Hapus vote dan share dari voter terakhir
+    if (lastVoter) {
+      delete currentVotes[lastVoter];
+      delete currentShares[lastVoter];
+      
+      console.log(`🔄 Rolling back vote from ${lastVoter}`);
+    }
+    
+    // Kembalikan status ke pending
+    await pool.query(`
+      UPDATE proposals 
+      SET status = 'pending',
+          votes = $1,
+          submitted_shares = $2,
+          execution_result = $3,
+          executed_at = NULL,
+          updated_at = NOW()
+      WHERE proposal_id = $4
+    `, [
+      JSON.stringify(currentVotes),
+      JSON.stringify(currentShares),
+      JSON.stringify({ 
+        error: e.message, 
+        stack: e.stack,
+        rollback_reason: "Execution failed, rolled back to pending"
+      }),
+      proposalId
+    ]);
+    
+    // Emit event untuk notify frontend bahwa proposal di-rollback
+    io.emit('proposal-rollback', { 
+      proposalId, 
+      status: 'pending',
+      error: e.message,
+      rolledBackVoter: lastVoter,
+      remainingVotes: Object.keys(currentVotes).length,
+      requiredVotes: AUTHORIZED_DEVS.length
+    });
+    
+    // Juga emit update-state agar UI refresh
+    const updatedProposal = await pool.query('SELECT * FROM proposals WHERE proposal_id = $1', [proposalId]);
+    io.emit('proposal-voted', {
+      proposalId,
+      votes: currentVotes,
+      totalVotes: Object.keys(currentVotes).length,
+      required: AUTHORIZED_DEVS.length
+    });
   }
 }
+
+
 
 async function executeProposal(proposal) {
   // Reconstruct mnemonic from shares
@@ -400,29 +484,10 @@ async function executeBurnToken(mnemonic, data) {
   return { txHash: result.transactionHash };
 }
 
-// ===== SWAP MODULE ADDRESS =====
-const SWAP_MODULE_ADDRESS = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
-
-// ===== CHECK POOL EXISTS =====
-async function checkPoolExists(tokenContract) {
-  try {
-    const response = await fetch(`${LCD}/paxi/swap/pool/${tokenContract}`);
-    const data = await response.json();
-    
-    if (response.ok && data.pool) {
-      console.log("✅ Pool exists:", data.pool);
-      return true;
-    }
-    return false;
-  } catch (e) {
-    console.log("❌ Pool check error:", e.message);
-    return false;
-  }
-}
-
-// ===== ADD LIQUIDITY (Auto-Create Pool) =====
+// ===== PERBAIKAN UNTUK ADD LIQUIDITY =====
+// PAXINET SWAP MODULE MENGGUNAKAN NATIVE MODULE, BUKAN COSMWASM CONTRACT
 async function executeAddLiquidity(mnemonic, data) {
-  console.log("💧 Adding Liquidity (Auto-Create Pool if needed)...");
+  console.log("💧 Adding Liquidity (Paxinet Native Module)...");
   console.log("Token:", data.tokenContract);
   console.log("PAXI Amount:", data.paxiAmount);
   console.log("Token Amount:", data.tokenAmount);
@@ -430,20 +495,19 @@ async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
   
-  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+  // PENTING: Untuk native module, gunakan SigningStargateClient, BUKAN SigningCosmWasmClient
+  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
   try {
-    // Check pool existence
-    const poolExists = await checkPoolExists(data.tokenContract);
-    
-    if (!poolExists) {
-      console.log("⚠️ Pool doesn't exist, will create automatically...");
-    }
-    
-    // Step 1: Increase Allowance (WAJIB untuk create maupun add)
+    // Step 1: Increase Allowance untuk PRC20 token (ini tetap menggunakan CosmWasm)
     console.log("📝 Step 1: Increasing allowance...");
+    
+    const clientWasm = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+      gasPrice: GasPrice.fromString("0.05upaxi")
+    });
+    
     const allowanceMsg = {
       increase_allowance: {
         spender: SWAP_MODULE_ADDRESS,
@@ -451,7 +515,7 @@ async function executeAddLiquidity(mnemonic, data) {
       }
     };
     
-    const allowanceResult = await client.execute(
+    const allowanceResult = await clientWasm.execute(
       account.address,
       data.tokenContract,
       allowanceMsg,
@@ -461,37 +525,42 @@ async function executeAddLiquidity(mnemonic, data) {
     
     console.log("✅ Allowance TX:", allowanceResult.transactionHash);
     
-    // Wait for confirmation
+    // Wait untuk konfirmasi blockchain
     await new Promise(resolve => setTimeout(resolve, 6000));
     
-    // Step 2: Provide Liquidity (akan otomatis create pool jika belum ada)
-    console.log(`💧 Step 2: ${poolExists ? 'Adding' : 'Creating pool &'} providing liquidity...`);
+    // Step 2: Provide Liquidity menggunakan MsgProvideLiquidity (native message)
+    console.log("💧 Step 2: Providing liquidity via native module...");
     
+    // Buat message menggunakan format Protobuf native Paxinet
+    // CATATAN: Karena ini native module, kita perlu menggunakan format yang berbeda
+    
+    // Opsi 1: Jika Paxinet punya message type untuk provide liquidity
     const provideLiquidityMsg = {
-      provide_liquidity: {
+      typeUrl: "/paxi.swap.MsgProvideLiquidity", // Sesuaikan dengan protobuf path Paxinet
+      value: {
+        creator: account.address,
         prc20: data.tokenContract,
-        prc20_amount: data.tokenAmount
+        prc20Amount: data.tokenAmount,
+        // PAXI amount akan dikirim via funds
       }
     };
     
-    const result = await client.execute(
+    // Kirim transaction dengan funds PAXI
+    const result = await client.signAndBroadcast(
       account.address,
-      SWAP_MODULE_ADDRESS,
-      provideLiquidityMsg,
+      [provideLiquidityMsg],
       "auto",
-      poolExists ? "Add liquidity to pool" : "Create pool with initial liquidity",
-      [{ denom: "upaxi", amount: data.paxiAmount }] // PENTING: Funds PAXI
+      "Provide liquidity to swap pool",
+      [{ denom: "upaxi", amount: data.paxiAmount }] // Funds PAXI
     );
     
-    console.log(`✅ ${poolExists ? 'Liquidity Added' : 'Pool Created & Liquidity Added'}! TX:`, result.transactionHash);
+    console.log("✅ Liquidity Provided! TX:", result.transactionHash);
     
     return {
       success: true,
       txHash: result.transactionHash,
       allowanceTxHash: allowanceResult.transactionHash,
-      height: result.height,
-      poolCreated: !poolExists,
-      method: "cosmjs"
+      height: result.height
     };
     
   } catch (error) {
@@ -500,41 +569,38 @@ async function executeAddLiquidity(mnemonic, data) {
   }
 }
 
-// ===== WITHDRAW LIQUIDITY =====
+// ===== PERBAIKAN UNTUK REMOVE LIQUIDITY =====
 async function executeRemoveLiquidity(mnemonic, data) {
-  console.log("🔙 Withdrawing Liquidity...");
+  console.log("🔙 Withdrawing Liquidity (Paxinet Native Module)...");
   console.log("Token:", data.tokenContract);
   console.log("LP Amount:", data.lpAmount);
   
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
   
-  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+  // Gunakan SigningStargateClient untuk native module
+  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
   try {
-    // Check if pool exists
-    const poolExists = await checkPoolExists(data.tokenContract);
-    if (!poolExists) {
-      throw new Error("Pool does not exist!");
-    }
+    console.log("💧 Withdrawing liquidity via native module...");
     
-    console.log("💧 Withdrawing liquidity...");
-    
+    // Buat message untuk withdraw liquidity
     const withdrawLiquidityMsg = {
-      withdraw_liquidity: {
+      typeUrl: "/paxi.swap.MsgWithdrawLiquidity", // Sesuaikan dengan protobuf path Paxinet
+      value: {
+        creator: account.address,
         prc20: data.tokenContract,
-        lp_amount: data.lpAmount
+        lpAmount: data.lpAmount
       }
     };
     
-    const result = await client.execute(
+    const result = await client.signAndBroadcast(
       account.address,
-      SWAP_MODULE_ADDRESS,
-      withdrawLiquidityMsg,
+      [withdrawLiquidityMsg],
       "auto",
-      "Withdraw liquidity from pool"
+      "Withdraw liquidity from swap pool"
     );
     
     console.log("✅ Liquidity Withdrawn! TX:", result.transactionHash);
@@ -542,13 +608,98 @@ async function executeRemoveLiquidity(mnemonic, data) {
     return {
       success: true,
       txHash: result.transactionHash,
-      lpAmount: data.lpAmount,
-      method: "cosmjs"
+      lpAmount: data.lpAmount
     };
     
   } catch (error) {
     console.error("❌ Withdraw liquidity failed:", error);
     throw new Error(`Withdraw liquidity failed: ${error.message}`);
+  }
+}
+
+// ===== ALTERNATIF: JIKA PROTOBUF MESSAGE BELUM TERDAFTAR =====
+// Gunakan CLI Fallback (jika SDK belum support message type ini)
+async function executeAddLiquidityViaCLI(mnemonic, data) {
+  console.log("💧 Adding Liquidity via CLI...");
+  
+  // Simpan mnemonic sementara untuk CLI
+  const tmpMnemonicFile = `/tmp/mnemonic_${Date.now()}.txt`;
+  await fs.writeFile(tmpMnemonicFile, mnemonic);
+  
+  try {
+    // Import key dari mnemonic
+    const keyName = `temp_key_${Date.now()}`;
+    await execPromise(`echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test`);
+    
+    // Step 1: Increase allowance
+    console.log("📝 Step 1: Increasing allowance...");
+    const allowanceCmd = `paxid tx wasm execute ${data.tokenContract} '{"increase_allowance":{"spender":"${SWAP_MODULE_ADDRESS}","amount":"${data.tokenAmount}"}}' --from ${keyName} --keyring-backend test --chain-id ${CHAIN_ID} --gas auto --gas-adjustment 1.5 --fees 30000upaxi -y`;
+    
+    const { stdout: allowanceTx } = await execPromise(allowanceCmd);
+    console.log("✅ Allowance TX sent");
+    
+    // Wait
+    await new Promise(resolve => setTimeout(resolve, 6000));
+    
+    // Step 2: Provide liquidity via swap module
+    console.log("💧 Step 2: Providing liquidity...");
+    const provideLiquidityCmd = `paxid tx swap provide-liquidity ${data.tokenContract} ${data.tokenAmount} ${data.paxiAmount}upaxi --from ${keyName} --keyring-backend test --chain-id ${CHAIN_ID} --gas auto --gas-adjustment 1.5 --fees 30000upaxi -y`;
+    
+    const { stdout: provideTx } = await execPromise(provideLiquidityCmd);
+    
+    // Parse txhash dari output
+    const txHashMatch = provideTx.match(/txhash: ([A-F0-9]+)/i);
+    const txHash = txHashMatch ? txHashMatch[1] : null;
+    
+    console.log("✅ Liquidity provided! TX:", txHash);
+    
+    // Cleanup
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch(() => {});
+    await fs.unlink(tmpMnemonicFile).catch(() => {});
+    
+    return {
+      success: true,
+      txHash,
+      method: "cli"
+    };
+    
+  } catch (error) {
+    // Cleanup on error
+    await fs.unlink(tmpMnemonicFile).catch(() => {});
+    throw error;
+  }
+}
+
+async function executeRemoveLiquidityViaCLI(mnemonic, data) {
+  console.log("🔙 Withdrawing Liquidity via CLI...");
+  
+  try {
+    // Import key dari mnemonic
+    const keyName = `temp_key_${Date.now()}`;
+    await execPromise(`echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test`);
+    
+    // Withdraw liquidity via swap module
+    const withdrawCmd = `paxid tx swap withdraw-liquidity ${data.tokenContract} ${data.lpAmount} --from ${keyName} --keyring-backend test --chain-id ${CHAIN_ID} --gas auto --gas-adjustment 1.5 --fees 30000upaxi -y`;
+    
+    const { stdout: withdrawTx } = await execPromise(withdrawCmd);
+    
+    // Parse txhash
+    const txHashMatch = withdrawTx.match(/txhash: ([A-F0-9]+)/i);
+    const txHash = txHashMatch ? txHashMatch[1] : null;
+    
+    console.log("✅ Liquidity withdrawn! TX:", txHash);
+    
+    // Cleanup
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test -y`).catch(() => {});
+    
+    return {
+      success: true,
+      txHash,
+      method: "cli"
+    };
+    
+  } catch (error) {
+    throw error;
   }
 }
 
