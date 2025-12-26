@@ -455,10 +455,25 @@ async function executeAddLiquidity(mnemonic, data) {
   
   try {
     const poolExists = await checkPoolExists(data.tokenContract);
+    // ===== NORMALISASI MINIMUM LIQUIDITY =====
+    const MIN_PAXI_UPAXI = 1_000_000n; // 1 PAXI
     
     if (!poolExists) {
       console.log("⚠️ Pool doesn't exist, will create automatically...");
+      
+      // Pool baru → paksa minimum 1 PAXI
+      let paxiUpaxi = BigInt(data.paxiAmount);
+      if (paxiUpaxi < MIN_PAXI_UPAXI) {
+        console.log(`⚠️ PAXI kurang dari minimum, otomatis dinaikkan ke 1 PAXI`);
+        data.paxiAmount = MIN_PAXI_UPAXI.toString();
+      }
+    } else {
+      // Pool sudah ada → hitung token sesuai rasio
+      // misal reservePaxi & reserveToken diambil dari checkPoolExists
+      const { reservePaxi, reserveToken } = poolExists;
+      data.tokenAmount = ((BigInt(data.paxiAmount) * BigInt(reserveToken)) / BigInt(reservePaxi)).toString();
     }
+    
     
     // Step 1: Import mnemonic
     console.log("📝 Step 1: Importing wallet...");
