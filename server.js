@@ -131,19 +131,6 @@ async function initDB() {
 
 initDB();
 
-
-function execPromise(cmd) {
-  return new Promise((resolve, reject) => {
-    exec(cmd, { env: process.env }, (err, stdout, stderr) => {
-      if (err) {
-        err.stdout = stdout;
-        err.stderr = stderr;
-        return reject(err);
-      }
-      resolve({ stdout, stderr });
-    });
-  });
-}
 // ===== PERBAIKI VALIDASI CLI =====
 async function verifyPaxid() {
   try {
