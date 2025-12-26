@@ -532,12 +532,13 @@ async function getChainId() {
 async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
-  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
+  
+  // === 1. SigningCosmWasmClient untuk increase_allowance ===
+  const wasmClient = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  // 1. Increase allowance (CW20 contract)
-  await client.execute(
+  await wasmClient.execute(
     account.address,
     data.tokenContract,
     {
@@ -549,7 +550,11 @@ async function executeAddLiquidity(mnemonic, data) {
     "auto"
   );
   
-  // 2. Build MsgProvideLiquidity sebagai raw Cosmos SDK Msg
+  // === 2. SigningStargateClient untuk provide liquidity ===
+  const stargateClient = await SigningStargateClient.connectWithSigner(RPC, wallet, {
+    gasPrice: GasPrice.fromString("0.05upaxi")
+  });
+  
   const msgProvideLiquidity = {
     typeUrl: "/paxi.swap.MsgProvideLiquidity",
     value: {
@@ -560,14 +565,12 @@ async function executeAddLiquidity(mnemonic, data) {
     }
   };
   
-  // 3. Sign & broadcast
   const fee = {
     amount: coins(5000, "upaxi"),
     gas: "200000"
   };
   
-  const res = await client.signAndBroadcast(account.address, [msgProvideLiquidity], fee);
-  
+  const res = await stargateClient.signAndBroadcast(account.address, [msgProvideLiquidity], fee);
   return { txHash: res.transactionHash };
 }
 
