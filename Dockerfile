@@ -1,5 +1,5 @@
 # ===== Stage 1: Build Paxid dari source =====
-FROM golang:1.22-bullseye AS builder
+FROM golang:1.24-bullseye AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -16,8 +16,13 @@ RUN git clone https://github.com/paxi-web3/paxi.git \
 && git checkout latest-main \
 && make install
 
-# Copy binary ke lokasi yang mudah diakses
-RUN cp $(which paxid) /usr/local/bin/paxid
+# Binary akan terinstall di $HOME/paxid/paxid (sesuai Makefile)
+# Copy binary ke lokasi standard
+RUN cp /root/paxid/paxid /usr/local/bin/paxid \
+&& chmod +x /usr/local/bin/paxid
+
+# Verify binary works
+RUN paxid version
 
 # ===== Stage 2: Runtime image dengan Node.js =====
 FROM node:18-slim
