@@ -400,9 +400,29 @@ async function executeBurnToken(mnemonic, data) {
   return { txHash: result.transactionHash };
 }
 
-// ===== ADD LIQUIDITY via REST API =====
+// ===== SWAP MODULE ADDRESS =====
+const SWAP_MODULE_ADDRESS = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
+
+// ===== CHECK POOL EXISTS =====
+async function checkPoolExists(tokenContract) {
+  try {
+    const response = await fetch(`${LCD}/paxi/swap/pool/${tokenContract}`);
+    const data = await response.json();
+    
+    if (response.ok && data.pool) {
+      console.log("✅ Pool exists:", data.pool);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.log("❌ Pool check error:", e.message);
+    return false;
+  }
+}
+
+// ===== ADD LIQUIDITY (Auto-Create Pool) =====
 async function executeAddLiquidity(mnemonic, data) {
-  console.log("🔧 Adding Liquidity via REST API...");
+  console.log("💧 Adding Liquidity (Auto-Create Pool if needed)...");
   console.log("Token:", data.tokenContract);
   console.log("PAXI Amount:", data.paxiAmount);
   console.log("Token Amount:", data.tokenAmount);
@@ -415,11 +435,18 @@ async function executeAddLiquidity(mnemonic, data) {
   });
   
   try {
-    // Step 1: Increase Allowance (WAJIB)
-    console.log("📝 Increasing allowance...");
+    // Check pool existence
+    const poolExists = await checkPoolExists(data.tokenContract);
+    
+    if (!poolExists) {
+      console.log("⚠️ Pool doesn't exist, will create automatically...");
+    }
+    
+    // Step 1: Increase Allowance (WAJIB untuk create maupun add)
+    console.log("📝 Step 1: Increasing allowance...");
     const allowanceMsg = {
       increase_allowance: {
-        spender: "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t", // Swap module address
+        spender: SWAP_MODULE_ADDRESS,
         amount: data.tokenAmount
       }
     };
@@ -428,7 +455,8 @@ async function executeAddLiquidity(mnemonic, data) {
       account.address,
       data.tokenContract,
       allowanceMsg,
-      "auto"
+      "auto",
+      "Increase allowance for liquidity"
     );
     
     console.log("✅ Allowance TX:", allowanceResult.transactionHash);
@@ -436,62 +464,39 @@ async function executeAddLiquidity(mnemonic, data) {
     // Wait for confirmation
     await new Promise(resolve => setTimeout(resolve, 6000));
     
-    // Step 2: Provide Liquidity via REST API
-    console.log("💧 Providing liquidity...");
+    // Step 2: Provide Liquidity (akan otomatis create pool jika belum ada)
+    console.log(`💧 Step 2: ${poolExists ? 'Adding' : 'Creating pool &'} providing liquidity...`);
     
-    const provideLiquidityTx = {
-      base_req: {
-        from: account.address,
-        chain_id: "paxi-mainnet-1"
-      },
-      prc20: data.tokenContract,
-      paxi_amount: data.paxiAmount,
-      prc20_amount: data.tokenAmount
+    const provideLiquidityMsg = {
+      provide_liquidity: {
+        prc20: data.tokenContract,
+        prc20_amount: data.tokenAmount
+      }
     };
     
-    const response = await fetch(`${LCD}/paxi/swap/provide_liquidity`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(provideLiquidityTx)
-    });
+    const result = await client.execute(
+      account.address,
+      SWAP_MODULE_ADDRESS,
+      provideLiquidityMsg,
+      "auto",
+      poolExists ? "Add liquidity to pool" : "Create pool with initial liquidity",
+      [{ denom: "upaxi", amount: data.paxiAmount }] // PENTING: Funds PAXI
+    );
     
-    const unsignedTx = await response.json();
-    
-    if (!response.ok) {
-      throw new Error(`REST API Error: ${JSON.stringify(unsignedTx)}`);
-    }
-    
-    // Sign and broadcast
-    const signedTx = await wallet.signAmino(account.address, unsignedTx.value);
-    
-    const broadcastResponse = await fetch(`${LCD}/cosmos/tx/v1beta1/txs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tx_bytes: Buffer.from(JSON.stringify(signedTx)).toString('base64'),
-        mode: 'BROADCAST_MODE_SYNC'
-      })
-    });
-    
-    const result = await broadcastResponse.json();
-    
-    if (result.tx_response?.code !== 0) {
-      throw new Error(`Transaction failed: ${result.tx_response?.raw_log}`);
-    }
-    
-    console.log("✅ Liquidity Added! TX:", result.tx_response.txhash);
+    console.log(`✅ ${poolExists ? 'Liquidity Added' : 'Pool Created & Liquidity Added'}! TX:`, result.transactionHash);
     
     return {
       success: true,
-      txHash: result.tx_response.txhash,
+      txHash: result.transactionHash,
       allowanceTxHash: allowanceResult.transactionHash,
-      height: result.tx_response.height,
-      method: "rest_api"
+      height: result.height,
+      poolCreated: !poolExists,
+      method: "cosmjs"
     };
     
   } catch (error) {
     console.error("❌ Add liquidity failed:", error);
-    throw new Error(`REST API execution failed: ${error.message}`);
+    throw new Error(`Add liquidity failed: ${error.message}`);
   }
 }
 
