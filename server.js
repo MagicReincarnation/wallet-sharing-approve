@@ -543,7 +543,7 @@ async function executeAddLiquidity(mnemonic, data) {
     data.tokenContract,
     {
       increase_allowance: {
-        spender: data.swapModuleAddress,
+        spender: "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t",
         amount: toBaseUnit(data.tokenAmount)
       }
     },
