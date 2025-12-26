@@ -400,10 +400,9 @@ async function executeBurnToken(mnemonic, data) {
   return { txHash: result.transactionHash };
 }
 
-// ===== FIX: ADD LIQUIDITY =====
-// ===== ADD LIQUIDITY (Fixed - Using CosmJS MsgExecuteContract) =====
+// ===== ADD LIQUIDITY via REST API =====
 async function executeAddLiquidity(mnemonic, data) {
-  console.log("🔧 Adding Liquidity via CosmJS...");
+  console.log("🔧 Adding Liquidity via REST API...");
   console.log("Token:", data.tokenContract);
   console.log("PAXI Amount:", data.paxiAmount);
   console.log("Token Amount:", data.tokenAmount);
@@ -429,57 +428,76 @@ async function executeAddLiquidity(mnemonic, data) {
       account.address,
       data.tokenContract,
       allowanceMsg,
-      "auto",
-      "Increase allowance for liquidity"
+      "auto"
     );
     
     console.log("✅ Allowance TX:", allowanceResult.transactionHash);
     
-    // Wait for confirmation (6 seconds)
+    // Wait for confirmation
     await new Promise(resolve => setTimeout(resolve, 6000));
     
-    // Step 2: Provide Liquidity menggunakan MsgExecuteContract
+    // Step 2: Provide Liquidity via REST API
     console.log("💧 Providing liquidity...");
     
-    // Alamat kontrak Swap Module di Paxi
-    const SWAP_MODULE_ADDRESS = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
-    
-    const provideLiquidityMsg = {
-      provide_liquidity: {
-        prc20: data.tokenContract,
-        prc20_amount: data.tokenAmount
-      }
+    const provideLiquidityTx = {
+      base_req: {
+        from: account.address,
+        chain_id: "paxi-mainnet-1"
+      },
+      prc20: data.tokenContract,
+      paxi_amount: data.paxiAmount,
+      prc20_amount: data.tokenAmount
     };
     
-    // Execute dengan funds (PAXI yang akan ditambahkan ke pool)
-    const result = await client.execute(
-      account.address,
-      SWAP_MODULE_ADDRESS,
-      provideLiquidityMsg,
-      "auto",
-      "Add liquidity to pool",
-      [{ denom: "upaxi", amount: data.paxiAmount }] // Funds
-    );
+    const response = await fetch(`${LCD}/paxi/swap/provide_liquidity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(provideLiquidityTx)
+    });
     
-    console.log("✅ Liquidity Added! TX:", result.transactionHash);
+    const unsignedTx = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(`REST API Error: ${JSON.stringify(unsignedTx)}`);
+    }
+    
+    // Sign and broadcast
+    const signedTx = await wallet.signAmino(account.address, unsignedTx.value);
+    
+    const broadcastResponse = await fetch(`${LCD}/cosmos/tx/v1beta1/txs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tx_bytes: Buffer.from(JSON.stringify(signedTx)).toString('base64'),
+        mode: 'BROADCAST_MODE_SYNC'
+      })
+    });
+    
+    const result = await broadcastResponse.json();
+    
+    if (result.tx_response?.code !== 0) {
+      throw new Error(`Transaction failed: ${result.tx_response?.raw_log}`);
+    }
+    
+    console.log("✅ Liquidity Added! TX:", result.tx_response.txhash);
     
     return {
       success: true,
-      txHash: result.transactionHash,
+      txHash: result.tx_response.txhash,
       allowanceTxHash: allowanceResult.transactionHash,
-      height: result.height,
-      method: "cosmjs"
+      height: result.tx_response.height,
+      method: "rest_api"
     };
     
   } catch (error) {
     console.error("❌ Add liquidity failed:", error);
-    throw new Error(`Add liquidity execution failed: ${error.message}`);
+    throw new Error(`REST API execution failed: ${error.message}`);
   }
 }
 
-// ===== WITHDRAW LIQUIDITY (Fixed - Using CosmJS MsgExecuteContract) =====
+// ===== WITHDRAW LIQUIDITY =====
 async function executeRemoveLiquidity(mnemonic, data) {
-  console.log("🔧 Withdrawing Liquidity via CosmJS...");
+  console.log("🔙 Withdrawing Liquidity...");
   console.log("Token:", data.tokenContract);
   console.log("LP Amount:", data.lpAmount);
   
@@ -491,9 +509,13 @@ async function executeRemoveLiquidity(mnemonic, data) {
   });
   
   try {
-    console.log("💧 Withdrawing liquidity...");
+    // Check if pool exists
+    const poolExists = await checkPoolExists(data.tokenContract);
+    if (!poolExists) {
+      throw new Error("Pool does not exist!");
+    }
     
-    const SWAP_MODULE_ADDRESS = "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t";
+    console.log("💧 Withdrawing liquidity...");
     
     const withdrawLiquidityMsg = {
       withdraw_liquidity: {
@@ -521,7 +543,7 @@ async function executeRemoveLiquidity(mnemonic, data) {
     
   } catch (error) {
     console.error("❌ Withdraw liquidity failed:", error);
-    throw new Error(`Withdraw liquidity execution failed: ${error.message}`);
+    throw new Error(`Withdraw liquidity failed: ${error.message}`);
   }
 }
 
