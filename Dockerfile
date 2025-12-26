@@ -21,10 +21,15 @@ RUN git clone https://github.com/paxi-web3/paxi.git \
 RUN cp /root/paxid/paxid /usr/local/bin/paxid \
 && chmod +x /usr/local/bin/paxid
 
-# Find dan copy libwasmvm.x86_64.so
-RUN find /root/go/pkg/mod -name "libwasmvm.x86_64.so" -exec cp {} /usr/local/lib/libwasmvm.x86_64.so \;
+# Find dan copy libwasmvm.x86_64.so dari semua lokasi yang mungkin
+RUN find /go/pkg/mod -name "libwasmvm.*.so" 2>/dev/null | head -n 1 | xargs -I {} cp {} /usr/local/lib/libwasmvm.x86_64.so || \
+find /root -name "libwasmvm.*.so" 2>/dev/null | head -n 1 | xargs -I {} cp {} /usr/local/lib/libwasmvm.x86_64.so || \
+find / -name "libwasmvm.*.so" 2>/dev/null | head -n 1 | xargs -I {} cp {} /usr/local/lib/libwasmvm.x86_64.so
 
-# Verify binary works
+# Verify library exists
+RUN ls -lh /usr/local/lib/libwasmvm.x86_64.so
+
+# Update library cache dan verify binary works
 RUN ldconfig && paxid version
 
 # ===== Stage 2: Runtime image dengan Node.js =====
