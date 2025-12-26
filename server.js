@@ -532,38 +532,41 @@ async function getChainId() {
 async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
-  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  // 1. Increase allowance kepada swap module
+  // 1. Increase allowance (CW20 contract)
   await client.execute(
     account.address,
     data.tokenContract,
     {
       increase_allowance: {
-        spender: SWAP_MODULE_ADDRESS, // ini harus "paxi1mfru9azs5..."
+        spender: data.swapModuleAddress,
         amount: toBaseUnit(data.tokenAmount)
       }
     },
     "auto"
   );
   
-  // 2. Panggil provide_liquidity ke swap module sesuai docs
-  const provideMsg = {
-    provide_liquidity: {
-      paxi_amount: toBaseUnit(data.paxiAmount),
-      prc20_amount: toBaseUnit(data.tokenAmount),
-      prc20_contract: data.tokenContract
+  // 2. Build MsgProvideLiquidity sebagai raw Cosmos SDK Msg
+  const msgProvideLiquidity = {
+    typeUrl: "/paxi.swap.MsgProvideLiquidity",
+    value: {
+      sender: account.address,
+      prc20Contract: data.tokenContract,
+      paxiAmount: toBaseUnit(data.paxiAmount),
+      prc20Amount: toBaseUnit(data.tokenAmount)
     }
   };
   
-  const res = await client.execute(
-    account.address,
-    SWAP_MODULE_ADDRESS, // panggil modul swap, bukan token contract
-    provideMsg,
-    "auto"
-  );
+  // 3. Sign & broadcast
+  const fee = {
+    amount: coins(5000, "upaxi"),
+    gas: "200000"
+  };
+  
+  const res = await client.signAndBroadcast(account.address, [msgProvideLiquidity], fee);
   
   return { txHash: res.transactionHash };
 }
@@ -571,23 +574,25 @@ async function executeAddLiquidity(mnemonic, data) {
 async function executeRemoveLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
-  const client = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
+  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  const withdrawMsg = {
-    withdraw_liquidity: {
-      lp_amount: toBaseUnit(data.lpAmount),
-      prc20_contract: data.tokenContract
+  const msgWithdrawLiquidity = {
+    typeUrl: "/paxi.swap.MsgWithdrawLiquidity",
+    value: {
+      sender: account.address,
+      prc20Contract: data.tokenContract,
+      lpAmount: toBaseUnit(data.lpAmount)
     }
   };
   
-  const res = await client.execute(
-    account.address,
-    SWAP_MODULE_ADDRESS,
-    withdrawMsg,
-    "auto"
-  );
+  const fee = {
+    amount: coins(5000, "upaxi"),
+    gas: "200000"
+  };
+  
+  const res = await client.signAndBroadcast(account.address, [msgWithdrawLiquidity], fee);
   
   return { txHash: res.transactionHash };
 }
