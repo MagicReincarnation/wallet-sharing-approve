@@ -318,8 +318,8 @@ async function finalizeProposal(proposalId) {
     `, [
       JSON.stringify(currentVotes),
       JSON.stringify(currentShares),
-      JSON.stringify({ 
-        error: e.message, 
+      JSON.stringify({
+        error: e.message,
         stack: e.stack,
         rollback_reason: "Execution failed, rolled back to pending"
       }),
@@ -327,8 +327,8 @@ async function finalizeProposal(proposalId) {
     ]);
     
     // Emit event untuk notify frontend bahwa proposal di-rollback
-    io.emit('proposal-rollback', { 
-      proposalId, 
+    io.emit('proposal-rollback', {
+      proposalId,
       status: 'pending',
       error: e.message,
       rolledBackVoter: lastVoter,
@@ -533,7 +533,7 @@ async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
   
-  // === 1. Increase allowance via CW20 ===
+  // 1. SigningCosmWasmClient untuk increase_allowance CW20
   const wasmClient = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
@@ -550,25 +550,24 @@ async function executeAddLiquidity(mnemonic, data) {
     "auto"
   );
   
-  // === 2. Provide liquidity via Stargate ===
+  // 2. SigningStargateClient untuk provide liquidity
   const stargateClient = await SigningStargateClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
   const msgProvideLiquidity = {
-    typeUrl: "/paxi.swap.MsgProvideLiquidity",
+    typeUrl: "/x.swap.types.MsgProvideLiquidity",
     value: {
-      sender: account.address,
-      prc20Contract: data.tokenContract,
+      creator: account.address,
+      prc20: data.tokenContract,
       paxiAmount: toBaseUnit(data.paxiAmount),
       prc20Amount: toBaseUnit(data.tokenAmount)
     }
   };
   
-  const coins = data.paxiAmount ? [{ denom: "upaxi", amount: toBaseUnit(data.paxiAmount) }] : [];
-  
+  // Fee dengan coin object yang benar
   const fee = {
-    amount: coins.length ? coins : [{ denom: "upaxi", amount: "5000" }],
+    amount: [{ denom: "upaxi", amount: "5000" }],
     gas: "200000"
   };
   
