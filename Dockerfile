@@ -1,42 +1,42 @@
-# SOLUSI PALING SEDERHANA
-# Copy paxid dari container yang sudah ada, tanpa perlu compile
-
 FROM node:18-alpine
 
-# Install dependencies
+WORKDIR /app
+
+# Install dependencies dasar
 RUN apk add --no-cache \
     wget \
     curl \
     bash \
     ca-certificates
 
-WORKDIR /app
-
-# Download pre-compiled paxid binary dari release GitHub
-# Catatan: Sesuaikan versi dengan yang terbaru
-RUN wget -O /tmp/paxi.tar.gz https://github.com/paxi-web3/paxi/archive/refs/tags/v1.0.6.tar.gz && \
-    tar -xzf /tmp/paxi.tar.gz -C /tmp && \
-    # Jika ada pre-compiled binary di archive, copy ke /usr/local/bin
-    # Jika tidak ada, kita perlu compile (lihat alternative Dockerfile)
-    rm -rf /tmp/paxi.tar.gz
-
-# ALTERNATIVE: Install Go dan compile paxid
-RUN apk add --no-cache git make gcc musl-dev go && \
-    cd /tmp && \
-    git clone https://github.com/paxi-web3/paxi.git && \
-    cd paxi && \
-    git checkout v1.0.6 && \
-    make install && \
-    cp $HOME/go/bin/paxid /usr/local/bin/paxid || \
-    cp /root/go/bin/paxid /usr/local/bin/paxid || \
-    find / -name paxid -type f 2>/dev/null | head -1 | xargs -I {} cp {} /usr/local/bin/paxid && \
+# ===== SOLUSI 1: Download Pre-compiled Binary (RECOMMENDED) =====
+# Gunakan binary release resmi dari GitHub
+RUN PAXI_VERSION="v1.0.6" && \
+    ARCH=$(uname -m) && \
+    case $ARCH in \
+        x86_64) BINARY="paxid-linux-amd64" ;; \
+        aarch64) BINARY="paxid-linux-arm64" ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    wget -O /usr/local/bin/paxid "https://github.com/paxi-web3/paxi/releases/download/${PAXI_VERSION}/${BINARY}" && \
     chmod +x /usr/local/bin/paxid && \
-    cd / && \
-    rm -rf /tmp/paxi && \
-    apk del git make gcc musl-dev go
+    paxid version || echo "⚠️ paxid installation verification failed"
 
-# Verify installation
-RUN paxid version || echo "⚠️ paxid not found, liquidity features will be disabled"
+# ===== SOLUSI 2 (FALLBACK): Compile dari Source dengan Go 1.24 =====
+# Uncomment jika solusi 1 gagal
+# RUN apk add --no-cache git make gcc musl-dev && \
+#     wget https://go.dev/dl/go1.24.2.linux-amd64.tar.gz && \
+#     tar -C /usr/local -xzf go1.24.2.linux-amd64.tar.gz && \
+#     rm go1.24.2.linux-amd64.tar.gz && \
+#     export PATH=$PATH:/usr/local/go/bin && \
+#     cd /tmp && \
+#     git clone https://github.com/paxi-web3/paxi.git && \
+#     cd paxi && \
+#     git checkout v1.0.6 && \
+#     /usr/local/go/bin/go build -mod=readonly -tags "cosmwasm pebbledb" -o /usr/local/bin/paxid ./cmd/paxid && \
+#     chmod +x /usr/local/bin/paxid && \
+#     cd / && rm -rf /tmp/paxi /usr/local/go && \
+#     apk del git make gcc musl-dev
 
 # Copy package files
 COPY package*.json ./
