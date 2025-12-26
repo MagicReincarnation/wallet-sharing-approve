@@ -533,7 +533,7 @@ async function executeAddLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
   
-  // === 1. SigningCosmWasmClient untuk increase_allowance ===
+  // === 1. Increase allowance via CW20 ===
   const wasmClient = await SigningCosmWasmClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
@@ -550,7 +550,7 @@ async function executeAddLiquidity(mnemonic, data) {
     "auto"
   );
   
-  // === 2. SigningStargateClient untuk provide liquidity ===
+  // === 2. Provide liquidity via Stargate ===
   const stargateClient = await SigningStargateClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
@@ -565,8 +565,10 @@ async function executeAddLiquidity(mnemonic, data) {
     }
   };
   
+  const coins = data.paxiAmount ? [{ denom: "upaxi", amount: toBaseUnit(data.paxiAmount) }] : [];
+  
   const fee = {
-    amount: coins(5000, "upaxi"),
+    amount: coins.length ? coins : [{ denom: "upaxi", amount: "5000" }],
     gas: "200000"
   };
   
@@ -577,7 +579,8 @@ async function executeAddLiquidity(mnemonic, data) {
 async function executeRemoveLiquidity(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
   const [account] = await wallet.getAccounts();
-  const client = await SigningStargateClient.connectWithSigner(RPC, wallet, {
+  
+  const stargateClient = await SigningStargateClient.connectWithSigner(RPC, wallet, {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
@@ -585,18 +588,17 @@ async function executeRemoveLiquidity(mnemonic, data) {
     typeUrl: "/paxi.swap.MsgWithdrawLiquidity",
     value: {
       sender: account.address,
-      prc20Contract: data.tokenContract,
-      lpAmount: toBaseUnit(data.lpAmount)
+      lpAmount: toBaseUnit(data.lpAmount),
+      prc20Contract: data.tokenContract
     }
   };
   
   const fee = {
-    amount: coins(5000, "upaxi"),
+    amount: [{ denom: "upaxi", amount: "5000" }],
     gas: "200000"
   };
   
-  const res = await client.signAndBroadcast(account.address, [msgWithdrawLiquidity], fee);
-  
+  const res = await stargateClient.signAndBroadcast(account.address, [msgWithdrawLiquidity], fee);
   return { txHash: res.transactionHash };
 }
 
