@@ -356,11 +356,25 @@ async function executeSend(mnemonic, data) {
     gasPrice: GasPrice.fromString("0.05upaxi")
   });
   
-  const amount = { denom: data.denom || 'upaxi', amount: data.amount };
-  const result = await client.sendTokens(account.address, data.recipient, [amount], "auto", data.memo || "");
+  // PERBAIKAN: Gunakan toBaseUnit supaya "10" di DB jadi "10000000" (10 PAXI)
+  const finalAmount = toBaseUnit(data.amount);
+  
+  const amount = {
+    denom: data.denom || 'upaxi',
+    amount: finalAmount
+  };
+  
+  const result = await client.sendTokens(
+    account.address,
+    data.recipient,
+    [amount],
+    "auto",
+    data.memo || ""
+  );
   
   return { txHash: result.transactionHash, height: result.height };
 }
+
 
 async function executeSendToken(mnemonic, data) {
   const wallet = await DirectSecp256k1HdWallet.fromMnemonic(mnemonic, { prefix: "paxi" });
@@ -446,34 +460,24 @@ async function executeBurnToken(mnemonic, data) {
 // ===== ADD LIQUIDITY via CLI =====
 async function executeAddLiquidity(mnemonic, data) {
   console.log("💧 Adding Liquidity via Paxi CLI...");
+  
+  // Konversi angka "manusia" dari database ke "base unit" blockchain
+  const paxiBaseUnit = toBaseUnit(data.paxiAmount); // Misal: "10" -> "10000000"
+  const tokenBaseUnit = toBaseUnit(data.tokenAmount); // Misal: "5" -> "5000000"
+  
   console.log("Token:", data.tokenContract);
-  console.log("PAXI Amount:", data.paxiAmount);
-  console.log("Token Amount:", data.tokenAmount);
+  console.log("PAXI Amount (Human):", data.paxiAmount, "-> (Base):", paxiBaseUnit);
+  console.log("Token Amount (Human):", data.tokenAmount, "-> (Base):", tokenBaseUnit);
   
   const homeDir = '/tmp/paxid-home';
   const keyName = `multisig_${Date.now()}`;
   
   try {
     const poolExists = await checkPoolExists(data.tokenContract);
-    // ===== NORMALISASI MINIMUM LIQUIDITY =====
-    const MIN_PAXI_UPAXI = 1_000_000n; // 1 PAXI
     
     if (!poolExists) {
       console.log("⚠️ Pool doesn't exist, will create automatically...");
-      
-      // Pool baru → paksa minimum 1 PAXI
-      let paxiUpaxi = BigInt(data.paxiAmount);
-      if (paxiUpaxi < MIN_PAXI_UPAXI) {
-        console.log(`⚠️ PAXI kurang dari minimum, otomatis dinaikkan ke 1 PAXI`);
-        data.paxiAmount = MIN_PAXI_UPAXI.toString();
-      }
-    } else {
-      // Pool sudah ada → hitung token sesuai rasio
-      // misal reservePaxi & reserveToken diambil dari checkPoolExists
-      const { reservePaxi, reserveToken } = poolExists;
-      data.tokenAmount = ((BigInt(data.paxiAmount) * BigInt(reserveToken)) / BigInt(reservePaxi)).toString();
     }
-    
     
     // Step 1: Import mnemonic
     console.log("📝 Step 1: Importing wallet...");
@@ -482,11 +486,12 @@ async function executeAddLiquidity(mnemonic, data) {
     console.log("✅ Wallet imported");
     
     // Step 2: Increase allowance via wasm execute
+    // MENGGUNAKAN: tokenBaseUnit
     console.log("📝 Step 2: Increasing allowance...");
     const allowanceCmd = `paxid tx wasm execute ${data.tokenContract} \
       '{"increase_allowance": {
         "spender": "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t",
-        "amount": "${data.tokenAmount}"
+        "amount": "${tokenBaseUnit}"
       }}' \
       --from ${keyName} \
       --keyring-backend test \
@@ -512,11 +517,12 @@ async function executeAddLiquidity(mnemonic, data) {
     await new Promise(resolve => setTimeout(resolve, 6000));
     
     // Step 3: Provide liquidity via CLI
+    // MENGGUNAKAN: paxiBaseUnit dan tokenBaseUnit
     console.log(`💧 Step 3: ${poolExists ? 'Adding' : 'Creating pool &'} providing liquidity...`);
     const liquidityCmd = `paxid tx swap provide-liquidity \
       --prc20 "${data.tokenContract}" \
-      --paxi-amount "${data.paxiAmount}upaxi" \
-      --prc20-amount "${data.tokenAmount}" \
+      --paxi-amount "${paxiBaseUnit}upaxi" \
+      --prc20-amount "${tokenBaseUnit}" \
       --from ${keyName} \
       --keyring-backend test \
       --home ${homeDir} \
@@ -577,32 +583,33 @@ async function executeAddLiquidity(mnemonic, data) {
   }
 }
 
+
 // ===== WITHDRAW LIQUIDITY via CLI =====
 async function executeRemoveLiquidity(mnemonic, data) {
-  console.log("🔙 Withdrawing Liquidity via Paxi CLI...");
-  console.log("Token:", data.tokenContract);
-  console.log("LP Amount:", data.lpAmount);
+  console.log("🔙 Withdrawing Liquidity via Shares...");
+  
+  // Konversi angka manusia (10) ke base unit (10000000)
+  const lpBaseUnit = data.lpAmount;
+  
+  console.log("Token Contract:", data.tokenContract);
+  console.log("Shares to Withdraw (Human):", data.lpAmount);
+  // Opsional: Biar log di terminal lebih enak dibaca
+  console.log("Shares to Withdraw (Raw Base Unit):", lpBaseUnit);
+  console.log("Estimated Shares (Human):", (parseInt(lpBaseUnit) / 1000000).toFixed(2));
   
   const homeDir = '/tmp/paxid-home';
   const keyName = `multisig_${Date.now()}`;
   
   try {
-    const poolExists = await checkPoolExists(data.tokenContract);
-    if (!poolExists) {
-      throw new Error("Pool does not exist!");
-    }
-    
     // Step 1: Import wallet
-    console.log("📝 Step 1: Importing wallet...");
     const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test --home ${homeDir} 2>&1`;
-    await execPromise(importCmd, { timeout: 10000 });
-    console.log("✅ Wallet imported");
+    await execPromise(importCmd);
     
-    // Step 2: Withdraw liquidity
-    console.log("💧 Step 2: Withdrawing liquidity...");
+    // Step 2: Eksekusi withdraw-liquidity ke CLI
+    // CLI paxid tx swap withdraw-liquidity memang meminta nominal SHARES, bukan persen
     const withdrawCmd = `paxid tx swap withdraw-liquidity \
       --prc20 "${data.tokenContract}" \
-      --lp-amount "${data.lpAmount}" \
+      --lp-amount "${lpBaseUnit}" \
       --from ${keyName} \
       --keyring-backend test \
       --home ${homeDir} \
@@ -614,50 +621,25 @@ async function executeRemoveLiquidity(mnemonic, data) {
       --yes \
       --output json`;
     
-    const { stdout, stderr } = await execPromise(withdrawCmd, { timeout: 30000 });
+    const { stdout } = await execPromise(withdrawCmd);
+    const result = JSON.parse(stdout);
     
-    if (stderr && stderr.includes('error')) {
-      throw new Error(`CLI stderr: ${stderr}`);
-    }
-    
-    let result;
-    try {
-      result = JSON.parse(stdout);
-    } catch (parseError) {
-      const txHashMatch = stdout.match(/txhash:\s*([A-F0-9]+)/i);
-      if (txHashMatch) {
-        result = { txhash: txHashMatch[1], code: 0 };
-      } else {
-        throw new Error(`Cannot parse output: ${stdout}`);
-      }
-    }
-    
-    if (result.code && result.code !== 0) {
-      throw new Error(`Transaction failed: ${result.raw_log || result.log}`);
-    }
-    
-    console.log("✅ Liquidity Withdrawn! TX:", result.txhash);
+    if (result.code !== 0) throw new Error(result.raw_log || "Transaction Failed");
     
     // Cleanup
-    console.log("🧹 Cleaning up...");
     await execPromise(`paxid keys delete ${keyName} --keyring-backend test --home ${homeDir} --yes 2>&1`);
     
     return {
       success: true,
       txHash: result.txhash,
-      lpAmount: data.lpAmount,
-      method: "cli"
+      sharesWithdrawn: data.lpAmount,
+      height: result.height
     };
     
   } catch (error) {
-    console.error("❌ Withdraw liquidity failed:", error);
-    
-    // Cleanup on error
-    try {
-      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --home ${homeDir} --yes 2>&1`);
-    } catch {}
-    
-    throw new Error(`Withdraw liquidity failed: ${error.message}`);
+    console.error("❌ Withdraw failed:", error);
+    try { await execPromise(`paxid keys delete ${keyName} --keyring-backend test --home ${homeDir} --yes 2>&1`); } catch {}
+    throw new Error(`Withdraw failed: ${error.message}`);
   }
 }
 
