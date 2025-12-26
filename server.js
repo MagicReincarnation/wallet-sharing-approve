@@ -10,6 +10,11 @@ const cors = require('cors');
 const { DirectSecp256k1HdWallet } = require("@cosmjs/proto-signing");
 const { SigningCosmWasmClient } = require("@cosmjs/cosmwasm-stargate");
 const { SigningStargateClient, GasPrice } = require("@cosmjs/stargate");
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+const fs = require('fs').promises;
+const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
@@ -117,6 +122,26 @@ async function initDB() {
 }
 
 initDB();
+
+// ===== CHECK PAXID CLI =====
+async function checkPaxiCLI() {
+  try {
+    const { stdout } = await execPromise('which paxid');
+    const paxidPath = stdout.trim();
+    console.log('✅ Paxi CLI Found:', paxidPath);
+    
+    const { stdout: version } = await execPromise('paxid version');
+    console.log('📦 Version:', version.trim());
+    
+    return true;
+  } catch (e) {
+    console.error('❌ Paxi CLI Not Found!');
+    console.error('Make sure Dockerfile includes paxid installation');
+    return false;
+  }
+}
+
+checkPaxiCLI();
 
 async function getState() {
   const res = await pool.query('SELECT * FROM wallet_state WHERE id = 1');
@@ -411,6 +436,216 @@ async function executeBurnToken(mnemonic, data) {
   const result = await client.execute(account.address, data.contractAddress, msg, "auto");
   
   return { txHash: result.transactionHash };
+}
+
+// ===== ADD LIQUIDITY via CLI =====
+async function executeAddLiquidity(mnemonic, data) {
+  console.log("💧 Adding Liquidity via Paxi CLI...");
+  console.log("Token:", data.tokenContract);
+  console.log("PAXI Amount:", data.paxiAmount);
+  console.log("Token Amount:", data.tokenAmount);
+  
+  const tmpDir = await fs.mkdtemp(`${os.tmpdir()}/paxi-`);
+  const keyName = `multisig_${Date.now()}`;
+  
+  try {
+    const poolExists = await checkPoolExists(data.tokenContract);
+    
+    if (!poolExists) {
+      console.log("⚠️ Pool doesn't exist, will create automatically...");
+    }
+    
+    // Import mnemonic
+    console.log("📝 Importing wallet...");
+    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    await execPromise(importCmd, { timeout: 10000 });
+    console.log("✅ Wallet imported");
+    
+    // Increase allowance
+    console.log("📝 Increasing allowance...");
+    const allowanceCmd = `paxid tx wasm execute ${data.tokenContract} \
+      '{"increase_allowance": {
+        "spender": "paxi1mfru9azs5nua2wxcd4sq64g5nt7nn4n80r745t",
+        "amount": "${data.tokenAmount}"
+      }}' \
+      --from ${keyName} \
+      --keyring-backend test \
+      --chain-id paxi-mainnet-1 \
+      --node ${RPC} \
+      --gas auto \
+      --gas-adjustment 1.5 \
+      --fees 30000upaxi \
+      --yes \
+      --output json`;
+    
+    const { stdout: allowanceOut } = await execPromise(allowanceCmd, { timeout: 30000 });
+    const allowanceResult = JSON.parse(allowanceOut);
+    
+    if (allowanceResult.code && allowanceResult.code !== 0) {
+      throw new Error(`Allowance failed: ${allowanceResult.raw_log}`);
+    }
+    
+    console.log("✅ Allowance TX:", allowanceResult.txhash);
+    
+    // Wait for confirmation
+    await new Promise(resolve => setTimeout(resolve, 6000));
+    
+    // Provide liquidity
+    console.log(`💧 ${poolExists ? 'Adding' : 'Creating pool &'} providing liquidity...`);
+    const liquidityCmd = `paxid tx swap provide-liquidity \
+      --prc20 "${data.tokenContract}" \
+      --paxi-amount "${data.paxiAmount}" \
+      --prc20-amount "${data.tokenAmount}" \
+      --from ${keyName} \
+      --keyring-backend test \
+      --chain-id paxi-mainnet-1 \
+      --node ${RPC} \
+      --gas auto \
+      --gas-adjustment 1.5 \
+      --fees 30000upaxi \
+      --yes \
+      --output json`;
+    
+    const { stdout, stderr } = await execPromise(liquidityCmd, { timeout: 30000 });
+    
+    if (stderr && stderr.includes('error')) {
+      throw new Error(`CLI stderr: ${stderr}`);
+    }
+    
+    let result;
+    try {
+      result = JSON.parse(stdout);
+    } catch (parseError) {
+      const txHashMatch = stdout.match(/txhash:\s*([A-F0-9]+)/i);
+      if (txHashMatch) {
+        result = { txhash: txHashMatch[1], code: 0 };
+      } else {
+        throw new Error(`Cannot parse output: ${stdout}`);
+      }
+    }
+    
+    if (result.code && result.code !== 0) {
+      throw new Error(`Transaction failed: ${result.raw_log || result.log}`);
+    }
+    
+    console.log(`✅ ${poolExists ? 'Liquidity Added' : 'Pool Created & Liquidity Added'}! TX:`, result.txhash);
+    
+    // Cleanup
+    console.log("🧹 Cleaning up...");
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+    await fs.rm(tmpDir, { recursive: true, force: true });
+    
+    return {
+      success: true,
+      txHash: result.txhash,
+      allowanceTxHash: allowanceResult.txhash,
+      height: result.height,
+      poolCreated: !poolExists,
+      method: "cli"
+    };
+    
+  } catch (error) {
+    console.error("❌ Add liquidity failed:", error);
+    
+    // Cleanup on error
+    try {
+      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+    } catch {}
+    
+    try {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    } catch {}
+    
+    throw new Error(`Add liquidity failed: ${error.message}`);
+  }
+}
+
+// ===== WITHDRAW LIQUIDITY via CLI =====
+async function executeRemoveLiquidity(mnemonic, data) {
+  console.log("🔙 Withdrawing Liquidity via Paxi CLI...");
+  console.log("Token:", data.tokenContract);
+  console.log("LP Amount:", data.lpAmount);
+  
+  const tmpDir = await fs.mkdtemp(`${os.tmpdir()}/paxi-`);
+  const keyName = `multisig_${Date.now()}`;
+  
+  try {
+    const poolExists = await checkPoolExists(data.tokenContract);
+    if (!poolExists) {
+      throw new Error("Pool does not exist!");
+    }
+    
+    // Import wallet
+    console.log("📝 Importing wallet...");
+    const importCmd = `echo "${mnemonic}" | paxid keys add ${keyName} --recover --keyring-backend test 2>&1`;
+    await execPromise(importCmd, { timeout: 10000 });
+    console.log("✅ Wallet imported");
+    
+    // Withdraw liquidity
+    console.log("💧 Withdrawing liquidity...");
+    const withdrawCmd = `paxid tx swap withdraw-liquidity \
+      --prc20 "${data.tokenContract}" \
+      --lp-amount "${data.lpAmount}" \
+      --from ${keyName} \
+      --keyring-backend test \
+      --chain-id paxi-mainnet-1 \
+      --node ${RPC} \
+      --gas auto \
+      --gas-adjustment 1.5 \
+      --fees 30000upaxi \
+      --yes \
+      --output json`;
+    
+    const { stdout, stderr } = await execPromise(withdrawCmd, { timeout: 30000 });
+    
+    if (stderr && stderr.includes('error')) {
+      throw new Error(`CLI stderr: ${stderr}`);
+    }
+    
+    let result;
+    try {
+      result = JSON.parse(stdout);
+    } catch (parseError) {
+      const txHashMatch = stdout.match(/txhash:\s*([A-F0-9]+)/i);
+      if (txHashMatch) {
+        result = { txhash: txHashMatch[1], code: 0 };
+      } else {
+        throw new Error(`Cannot parse output: ${stdout}`);
+      }
+    }
+    
+    if (result.code && result.code !== 0) {
+      throw new Error(`Transaction failed: ${result.raw_log || result.log}`);
+    }
+    
+    console.log("✅ Liquidity Withdrawn! TX:", result.txhash);
+    
+    // Cleanup
+    console.log("🧹 Cleaning up...");
+    await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+    await fs.rm(tmpDir, { recursive: true, force: true });
+    
+    return {
+      success: true,
+      txHash: result.txhash,
+      lpAmount: data.lpAmount,
+      method: "cli"
+    };
+    
+  } catch (error) {
+    console.error("❌ Withdraw liquidity failed:", error);
+    
+    // Cleanup on error
+    try {
+      await execPromise(`paxid keys delete ${keyName} --keyring-backend test --yes 2>&1`);
+    } catch {}
+    
+    try {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    } catch {}
+    
+    throw new Error(`Withdraw liquidity failed: ${error.message}`);
+  }
 }
 
 // ===== ADD LIQUIDITY (Fixed) =====
